@@ -50,14 +50,16 @@ class UltrasoundDetector:
         self._load_model()
 
     def _load_model(self) -> None:
-        """尝试加载 PyTorch 模型权重"""
+        """尝试加载 PyTorch 模型权重（仅支持 state_dict 格式）"""
         if os.path.exists(self.model_path):
             try:
                 import torch
+                # weights_only=True 拒绝任意 pickle 对象，防止反序列化攻击（CVE-2025-32434）
+                # 要求权重文件为 state_dict（torch.save(model.state_dict(), path)）
                 self.model = torch.load(
                     self.model_path,
                     map_location="cpu",
-                    weights_only=False,
+                    weights_only=True,
                 )
                 self.model.eval()
                 logger.info(f"超声检测模型加载成功: {self.model_path}")
