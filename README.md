@@ -83,7 +83,7 @@ Graduation_Project_CHD-MedIA/
 
 ### 环境要求
 
-- **后端**：Python 3.8+
+- **后端**：Python 3.10+（推荐 3.10 或 3.11；`torch==2.6.0` 最低需要 Python 3.9，不支持 3.8）
 - **前端**：Node.js 16+
 - **可选**：阿里百炼 API Key（未配置时使用演示模式）
 
