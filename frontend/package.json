@@ -1,0 +1,23 @@
+{
+  "name": "chd-media-frontend",
+  "version": "1.0.0",
+  "description": "先天性心脏病影像检测与报告生成系统 - 前端",
+  "private": true,
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "vue": "^3.4.27",
+    "vue-router": "^4.3.3",
+    "pinia": "^2.1.7",
+    "element-plus": "^2.7.5",
+    "@element-plus/icons-vue": "^2.3.1",
+    "axios": "^1.7.2"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-vue": "^5.0.5",
+    "vite": "^5.3.1"
+  }
+}
