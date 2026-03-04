@@ -36,3 +36,9 @@ tenacity==8.3.0
 # Utilities
 python-dotenv==1.0.1
 loguru==0.7.2
+
+# Training dependencies
+scipy==1.11.4              # 数据增强（rotate, zoom）
+tensorboard==2.18.0        # 训练可视化
+tqdm==4.67.1               # 进度条
+pyyaml==6.0.2              # 配置文件解析

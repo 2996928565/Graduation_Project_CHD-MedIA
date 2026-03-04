@@ -1,0 +1,49 @@
+# MM-WHS 2017 MRI 训练配置文件
+# 可以通过修改此文件快速调整训练参数
+
+# ============ 数据配置 ============
+data:
+  data_dir: "E:/BaiduNetdiskDownload"  # 数据根目录
+  modality: "mr"                        # mr 或 ct
+  crop_size: [64, 128, 128]            # 3D patch大小 (D, H, W)
+  train_ratio: 0.8                      # 训练集比例
+  num_workers: 4                        # 数据加载线程数
+
+# ============ 模型配置 ============
+model:
+  num_classes: 8                        # 类别数（MM-WHS: 8含背景）
+  base_channels: 16                     # 基础通道数
+                                        # 16 -> ~5M参数，适合12GB显存
+                                        # 32 -> ~20M参数，适合24GB显存
+
+# ============ 训练配置 ============
+training:
+  epochs: 200                           # 训练轮数
+  batch_size: 2                         # 批次大小（3D建议1-2）
+  lr: 0.001                             # 初始学习率
+  weight_decay: 0.00001                 # 权重衰减
+  
+  # 损失函数权重
+  loss:
+    ce_weight: 0.5                      # CrossEntropy权重
+    dice_weight: 0.5                    # Dice权重
+
+  # 学习率调度
+  scheduler:
+    mode: "max"                         # 'max'表示监控指标越大越好
+    factor: 0.5                         # 学习率衰减因子
+    patience: 10                        # 容忍epoch数
+
+# ============ 保存配置 ============
+save:
+  save_dir: "backend/training/checkpoints"
+  save_interval: 20                     # 每N个epoch保存检查点
+
+# ============ 硬件配置 ============
+device: "cuda"                          # cuda 或 cpu
+
+# ============ 注意事项 ============
+# 1. 显存不足时：减小 batch_size、crop_size 或 base_channels
+# 2. 训练速度慢时：增加 num_workers（但别超过CPU核心数）
+# 3. 过拟合时：增大 weight_decay 或使用更强的数据增强
+# 4. 收敛慢时：尝试增大 lr 或调整 loss 权重
