@@ -54,6 +54,24 @@ def normalize_intensity(image: np.ndarray, lower_perc: float = 1.0, upper_perc: 
     return image.astype(np.float32)
 
 
+def _center_crop_or_pad(image: np.ndarray, target_size: Tuple[int, int, int]) -> np.ndarray:
+    """将图像中心裁剪或 zero-pad 到 target_size（用于无标注的 test split）"""
+    result = np.zeros(target_size, dtype=image.dtype)
+    slices_src = []
+    slices_dst = []
+    for src_len, tgt_len in zip(image.shape, target_size):
+        if src_len >= tgt_len:
+            start_src = (src_len - tgt_len) // 2
+            slices_src.append(slice(start_src, start_src + tgt_len))
+            slices_dst.append(slice(0, tgt_len))
+        else:
+            start_dst = (tgt_len - src_len) // 2
+            slices_src.append(slice(0, src_len))
+            slices_dst.append(slice(start_dst, start_dst + src_len))
+    result[tuple(slices_dst)] = image[tuple(slices_src)]
+    return result
+
+
 def random_crop_3d(image: np.ndarray, label: np.ndarray, crop_size: Tuple[int, int, int]) -> Tuple[np.ndarray, np.ndarray]:
     """随机裁剪3D patch"""
     d, h, w = image.shape
@@ -144,6 +162,10 @@ class MMWHSDataset(Dataset):
     """
     MM-WHS 2017 Dataset
     支持MRI和CT模态的3D patch训练
+
+    注意：MM-WHS 的 {modality}_test/ 目录下没有标注文件。
+    - split='train'/'val'：从 {modality}_train/ 按比例划分，需要标注
+    - split='test'        ：从 {modality}_test/  加载，仅图像，无标注
     """
     
     def __init__(
@@ -154,122 +176,123 @@ class MMWHSDataset(Dataset):
         crop_size: Tuple[int, int, int] = (64, 128, 128),
         augment: bool = True,
         train_ratio: float = 0.8,
-        use_test_split: bool = False,
     ):
         """
         Args:
-            data_dir: 数据根目录，包含 {modality}_train/ 或 {modality}_test/ 文件夹
-            split: 'train' or 'val' (当 use_test_split=False 时从 train 中划分)
+            data_dir: 数据根目录，包含 {modality}_train/ 和 {modality}_test/ 文件夹
+            split: 'train'、'val' 或 'test'
+                   - 'train'/'val' 从 {modality}_train/ 按 train_ratio 比例划分
+                   - 'test' 从 {modality}_test/ 加载，无标注
             modality: 'mr' 或 'ct'
             crop_size: 3D patch大小 (D, H, W)
-            augment: 是否使用数据增强
-            train_ratio: 训练集比例（仅在 use_test_split=False 时使用）
-            use_test_split: 是否使用独立的测试集（True: 从 mr_test/ 读取，False: 从 mr_train/ 划分）
+            augment: 是否使用数据增强（test split 强制关闭）
+            train_ratio: 训练集比例（仅 train/val split 有效）
         """
         self.data_dir = Path(data_dir)
         self.split = split
         self.modality = modality
         self.crop_size = crop_size
+        self.has_labels = (split != "test")  # test split 无标注
         self.augment = augment and (split == "train")
         
-        # 根据 use_test_split 决定查找哪个文件夹
-        if use_test_split:
-            # 使用独立的测试集：train 从 mr_train/ 读取，val 从 mr_test/ 读取
-            if split == "train":
-                pattern = f"{modality}_train_*_image.nii.gz"
-                search_patterns = [
-                    f"*_{modality}_train/{pattern}",
-                    f"{modality}_train/{pattern}",
-                    pattern
-                ]
-            else:  # val
-                pattern = f"{modality}_test_*_image.nii.gz"
-                search_patterns = [
-                    f"*_{modality}_test/{pattern}",
-                    f"{modality}_test/{pattern}",
-                    pattern
-                ]
+        if split == "test":
+            # ---------- test split：从 {modality}_test/ 加载，无标注 ----------
+            test_pattern = f"{modality}_test_*_image.nii.gz"
+            search_patterns = [
+                f"*_{modality}_test/{test_pattern}",
+                f"{modality}_test/{test_pattern}",
+                test_pattern,
+            ]
+            image_files = []
+            for sp in search_patterns:
+                image_files = sorted(list(self.data_dir.glob(sp)))
+                if image_files:
+                    break
+            if not image_files:
+                raise FileNotFoundError(
+                    f"未找到{modality} test 影像文件！请检查数据目录: {self.data_dir}\n"
+                    f"期望格式: {test_pattern}"
+                )
+            self.image_files = image_files
+            self.label_files = []  # 无标注
         else:
-            # 从 mr_train/ 中划分训练集和验证集
+            # ---------- train/val split：从 {modality}_train/ 划分 ----------
             pattern = f"{modality}_train_*_image.nii.gz"
             search_patterns = [
                 f"*_{modality}_train/{pattern}",
                 f"{modality}_train/{pattern}",
-                pattern
+                pattern,
             ]
-        
-        # 查找所有image文件
-        image_files = []
-        for search_pattern in search_patterns:
-            image_files = sorted(list(self.data_dir.glob(search_pattern)))
-            if image_files:
-                break
-        
-        if not image_files:
-            raise FileNotFoundError(
-                f"未找到{modality}影像文件！请检查数据目录: {self.data_dir}\n"
-                f"期望格式: {pattern}\n"
-                f"use_test_split={use_test_split}, split={split}"
-            )
-        
-        # 划分训练集/验证集（仅在不使用独立测试集时）
-        if use_test_split:
-            # 使用独立测试集，不需要划分
-            self.image_files = image_files
-        else:
-            # 从训练集中划分
+            image_files = []
+            for sp in search_patterns:
+                image_files = sorted(list(self.data_dir.glob(sp)))
+                if image_files:
+                    break
+            if not image_files:
+                raise FileNotFoundError(
+                    f"未找到{modality}影像文件！请检查数据目录: {self.data_dir}\n"
+                    f"期望格式: {pattern}"
+                )
+            
+            # 按比例划分
             n_train = int(len(image_files) * train_ratio)
             if split == "train":
                 self.image_files = image_files[:n_train]
-            else:
+            else:  # val
                 self.image_files = image_files[n_train:]
+            
+            # 对应的 label 文件
+            self.label_files = [
+                str(f).replace("_image.nii.gz", "_label.nii.gz")
+                for f in self.image_files
+            ]
+            # 验证 label 文件存在
+            for img_f, lbl_f in zip(self.image_files, self.label_files):
+                if not Path(lbl_f).exists():
+                    raise FileNotFoundError(f"标签文件不存在: {lbl_f}")
         
-        # 对应的label文件
-        self.label_files = [
-            str(f).replace("_image.nii.gz", "_label.nii.gz")
-            for f in self.image_files
-        ]
-        
-        # 验证文件存在
-        for img_f, lbl_f in zip(self.image_files, self.label_files):
-            if not Path(lbl_f).exists():
-                raise FileNotFoundError(f"标签文件不存在: {lbl_f}")
-        
-        print(f"[{split.upper()}] 加载 {len(self.image_files)} 例 {modality.upper()} 数据")
-        print(f"  示例: {self.image_files[0].name}")
+        print(f"[{split.upper()}] 加载 {len(self.image_files)} 例 {modality.upper()} 数据"
+              + ("（无标注）" if not self.has_labels else ""))
+        if self.image_files:
+            print(f"  示例: {self.image_files[0].name}")
     
     def __len__(self) -> int:
         return len(self.image_files)
     
     def __getitem__(self, idx: int) -> Tuple[torch.Tensor, torch.Tensor, dict]:
-        # 加载NIfTI
+        # 加载NIfTI图像
         img_sitk = sitk.ReadImage(str(self.image_files[idx]))
-        lbl_sitk = sitk.ReadImage(str(self.label_files[idx]))
-        
         img_arr = sitk.GetArrayFromImage(img_sitk).astype(np.float32)  # (D, H, W)
-        lbl_arr = sitk.GetArrayFromImage(lbl_sitk).astype(np.int32)
-        
-        # 标签重映射
-        lbl_arr = remap_labels(lbl_arr)
         
         # 强度归一化
         img_arr = normalize_intensity(img_arr)
         
-        # 提取patch
-        img_patch, lbl_patch = random_crop_3d(img_arr, lbl_arr, self.crop_size)
+        if self.has_labels:
+            # train / val：加载并重映射标注
+            lbl_sitk = sitk.ReadImage(str(self.label_files[idx]))
+            lbl_arr = sitk.GetArrayFromImage(lbl_sitk).astype(np.int32)
+            lbl_arr = remap_labels(lbl_arr)
+            
+            # 提取patch
+            img_patch, lbl_patch = random_crop_3d(img_arr, lbl_arr, self.crop_size)
+            
+            # 数据增强
+            if self.augment:
+                img_patch, lbl_patch = augment_3d(img_patch, lbl_patch, p=0.5)
+            
+            lbl_tensor = torch.from_numpy(lbl_patch).long()  # (D, H, W)
+        else:
+            # test：无标注，直接中心裁剪/pad 到 crop_size
+            img_patch = _center_crop_or_pad(img_arr, self.crop_size)
+            lbl_tensor = torch.zeros(self.crop_size, dtype=torch.long)  # 占位
         
-        # 数据增强
-        if self.augment:
-            img_patch, lbl_patch = augment_3d(img_patch, lbl_patch, p=0.5)
-        
-        # 转为tensor
         img_tensor = torch.from_numpy(img_patch).unsqueeze(0)  # (1, D, H, W)
-        lbl_tensor = torch.from_numpy(lbl_patch).long()        # (D, H, W)
         
         meta = {
             "filename": self.image_files[idx].name,
             "original_shape": img_arr.shape,
             "spacing": img_sitk.GetSpacing(),
+            "has_label": self.has_labels,
         }
         
         return img_tensor, lbl_tensor, meta
@@ -282,21 +305,15 @@ def get_dataloaders(
     crop_size: Tuple[int, int, int] = (64, 128, 128),
     num_workers: int = 4,
     train_ratio: float = 0.8,
-    use_separate_testset: bool = False,
 ):
     """
-    创建训练和验证DataLoader
-    
-    Args:
-        data_dir: 数据根目录
-        modality: 'mr' 或 'ct'
-        batch_size: 批次大小
-        crop_size: 3D patch大小
-        num_workers: 数据加载线程数
-        train_ratio: 训练集比例（仅在 use_separate_testset=False 时使用）
-        use_separate_testset: 是否使用独立测试集
-            - True: 训练集从 mr_train/ 读取，验证集从 mr_test/ 读取
-            - False: 从 mr_train/ 按照 train_ratio 划分训练集和验证集
+    创建训练和验证 DataLoader。
+
+    MM-WHS 的 {modality}_test/ 目录下没有标注文件，因此训练/验证均从
+    {modality}_train/ 按 train_ratio 比例划分，不使用 test 目录。
+
+    Returns:
+        (train_loader, val_loader)
     """
     train_dataset = MMWHSDataset(
         data_dir=data_dir,
@@ -305,7 +322,6 @@ def get_dataloaders(
         crop_size=crop_size,
         augment=True,
         train_ratio=train_ratio,
-        use_test_split=use_separate_testset,
     )
     
     val_dataset = MMWHSDataset(
@@ -315,7 +331,6 @@ def get_dataloaders(
         crop_size=crop_size,
         augment=False,
         train_ratio=train_ratio,
-        use_test_split=use_separate_testset,
     )
     
     train_loader = torch.utils.data.DataLoader(
@@ -335,6 +350,39 @@ def get_dataloaders(
     )
     
     return train_loader, val_loader
+
+
+def get_test_loader(
+    data_dir: str,
+    modality: str = "mr",
+    batch_size: int = 1,
+    crop_size: Tuple[int, int, int] = (64, 128, 128),
+    num_workers: int = 4,
+):
+    """
+    创建无标注的 test DataLoader（对应 {modality}_test/ 目录）。
+    返回的 label 张量为全零占位，meta['has_label'] == False。
+
+    Returns:
+        test_loader
+    """
+    test_dataset = MMWHSDataset(
+        data_dir=data_dir,
+        split="test",
+        modality=modality,
+        crop_size=crop_size,
+        augment=False,
+    )
+    
+    test_loader = torch.utils.data.DataLoader(
+        test_dataset,
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=num_workers,
+        pin_memory=True,
+    )
+    
+    return test_loader
 
 
 if __name__ == "__main__":
