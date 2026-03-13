@@ -115,7 +115,7 @@ async def global_exception_handler(request, exc):
 
 @app.on_event("startup")
 async def startup_event():
-    logger.info(f"🚀 {settings.app_name} v{settings.app_version} 启动中...")
+    logger.info(f"{settings.app_name} v{settings.app_version} 启动中...")
     logger.info(f"   Swagger UI: http://127.0.0.1:8000/docs")
     logger.info(f"   DashScope API: {'已配置' if settings.dashscope_api_key else '未配置（演示模式）'}")
 
