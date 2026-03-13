@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" fill="none">
+  <circle cx="32" cy="32" r="32" fill="#1a6fba"/>
+  <!-- Heart shape -->
+  <path d="M32 46 C32 46 16 36 16 25 C16 19.5 20.5 15 26 15 C28.8 15 31.3 16.3 32 17.5 C32.7 16.3 35.2 15 38 15 C43.5 15 48 19.5 48 25 C48 36 32 46 32 46Z" fill="white" opacity="0.9"/>
+  <!-- ECG line -->
+  <polyline points="14,32 22,32 25,22 28,42 31,28 34,38 37,32 50,32" stroke="#1a6fba" stroke-width="2.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

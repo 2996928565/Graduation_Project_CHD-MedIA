@@ -1,6 +1,6 @@
 """
 患者信息管理 API
-提供患者信息的创建、查询、更新接口，适配先心病筛查相关字段。
+提供患者信息的创建、查询、更新、删除接口，数据持久化到 MySQL。
 """
 import uuid
 from datetime import datetime
@@ -8,14 +8,14 @@ from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field
+from sqlalchemy.orm import Session
 
 from api.auth import verify_token
+from db.database import get_db
+from db.models import Patient
 from loguru import logger
 
 router = APIRouter(prefix="/patients", tags=["患者管理"])
-
-# ── 内存存储（生产环境请替换为数据库） ───────────────────────────────────────
-_patient_db: dict = {}
 
 
 # ── 数据模型 ──────────────────────────────────────────────────────────────────
@@ -28,10 +28,9 @@ class PatientCreate(BaseModel):
     id_number: Optional[str] = Field(None, description="身份证号（脱敏存储）")
     contact: Optional[str] = Field(None, description="联系电话")
 
-    # 先心病专属字段
     chd_risk_factors: List[str] = Field(
         default=[],
-        description="先心病高危因素，如：['母亲孕期感染风疹', '家族史', '染色体异常']",
+        description="先心病高危因素，如：['母亲孕期感染风疹', '家族史']",
     )
     exam_modality: str = Field(
         default="ultrasound",
@@ -49,6 +48,8 @@ class PatientUpdate(BaseModel):
     name: Optional[str] = Field(None, min_length=1, max_length=50)
     age: Optional[int] = Field(None, ge=0, le=150)
     sex: Optional[str] = Field(None, pattern="^(男|女|未知)$")
+    id_number: Optional[str] = None
+    contact: Optional[str] = None
     chd_risk_factors: Optional[List[str]] = None
     exam_modality: Optional[str] = Field(None, pattern="^(ultrasound|mri|both)$")
     chief_complaint: Optional[str] = None
@@ -63,6 +64,8 @@ class PatientResponse(BaseModel):
     name: str
     age: int
     sex: str
+    id_number: Optional[str]
+    contact: Optional[str]
     chd_risk_factors: List[str]
     exam_modality: str
     chief_complaint: Optional[str]
@@ -71,6 +74,28 @@ class PatientResponse(BaseModel):
     department: Optional[str]
     created_at: str
     updated_at: str
+
+    model_config = {"from_attributes": True}
+
+
+def _to_response(p: Patient) -> PatientResponse:
+    """将 ORM Patient 对象转为响应体"""
+    return PatientResponse(
+        patient_id=p.id,
+        name=p.name,
+        age=p.age,
+        sex=p.sex,
+        id_number=p.id_number,
+        contact=p.contact,
+        chd_risk_factors=p.chd_risk_factors or [],
+        exam_modality=p.exam_modality,
+        chief_complaint=p.chief_complaint,
+        medical_history=p.medical_history,
+        referring_doctor=p.referring_doctor,
+        department=p.department,
+        created_at=p.created_at.isoformat() if p.created_at else "",
+        updated_at=p.updated_at.isoformat() if p.updated_at else "",
+    )
 
 
 # ── API 路由 ──────────────────────────────────────────────────────────────────
@@ -83,29 +108,31 @@ class PatientResponse(BaseModel):
 )
 def create_patient(
     data: PatientCreate,
-    _token: str = Depends(verify_token),
+    db: Session = Depends(get_db),
+    _user: str = Depends(verify_token),
 ) -> PatientResponse:
     """录入患者基本信息及先心病筛查相关字段。"""
-    patient_id = str(uuid.uuid4())
-    now = datetime.now().isoformat()
-
-    patient = {
-        "patient_id": patient_id,
-        "name": data.name,
-        "age": data.age,
-        "sex": data.sex,
-        "chd_risk_factors": data.chd_risk_factors,
-        "exam_modality": data.exam_modality,
-        "chief_complaint": data.chief_complaint,
-        "medical_history": data.medical_history,
-        "referring_doctor": data.referring_doctor,
-        "department": data.department,
-        "created_at": now,
-        "updated_at": now,
-    }
-    _patient_db[patient_id] = patient
-    logger.info(f"新患者已录入 | ID: {patient_id} | 姓名: {data.name}")
-    return PatientResponse(**patient)
+    patient = Patient(
+        id=str(uuid.uuid4()),
+        name=data.name,
+        age=data.age,
+        sex=data.sex,
+        id_number=data.id_number,
+        contact=data.contact,
+        chd_risk_factors=data.chd_risk_factors,
+        exam_modality=data.exam_modality,
+        chief_complaint=data.chief_complaint,
+        medical_history=data.medical_history,
+        referring_doctor=data.referring_doctor,
+        department=data.department,
+        created_at=datetime.now(),
+        updated_at=datetime.now(),
+    )
+    db.add(patient)
+    db.commit()
+    db.refresh(patient)
+    logger.info(f"新患者已录入 | ID: {patient.id} | 姓名: {data.name}")
+    return _to_response(patient)
 
 
 @router.get(
@@ -114,10 +141,12 @@ def create_patient(
     summary="获取所有患者列表",
 )
 def list_patients(
-    _token: str = Depends(verify_token),
+    db: Session = Depends(get_db),
+    _user: str = Depends(verify_token),
 ) -> List[PatientResponse]:
     """返回所有已录入患者的信息列表。"""
-    return [PatientResponse(**p) for p in _patient_db.values()]
+    patients = db.query(Patient).order_by(Patient.created_at.desc()).all()
+    return [_to_response(p) for p in patients]
 
 
 @router.get(
@@ -127,16 +156,17 @@ def list_patients(
 )
 def get_patient(
     patient_id: str,
-    _token: str = Depends(verify_token),
+    db: Session = Depends(get_db),
+    _user: str = Depends(verify_token),
 ) -> PatientResponse:
     """根据患者 ID 获取详细信息。"""
-    patient = _patient_db.get(patient_id)
+    patient = db.query(Patient).filter(Patient.id == patient_id).first()
     if not patient:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"患者 ID {patient_id} 不存在",
         )
-    return PatientResponse(**patient)
+    return _to_response(patient)
 
 
 @router.patch(
@@ -147,23 +177,25 @@ def get_patient(
 def update_patient(
     patient_id: str,
     data: PatientUpdate,
-    _token: str = Depends(verify_token),
+    db: Session = Depends(get_db),
+    _user: str = Depends(verify_token),
 ) -> PatientResponse:
     """部分更新患者信息。"""
-    patient = _patient_db.get(patient_id)
+    patient = db.query(Patient).filter(Patient.id == patient_id).first()
     if not patient:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"患者 ID {patient_id} 不存在",
         )
 
-    update_data = data.model_dump(exclude_none=True)
-    patient.update(update_data)
-    patient["updated_at"] = datetime.now().isoformat()
-    _patient_db[patient_id] = patient
+    for field, value in data.model_dump(exclude_none=True).items():
+        setattr(patient, field, value)
+    patient.updated_at = datetime.now()
 
+    db.commit()
+    db.refresh(patient)
     logger.info(f"患者信息已更新 | ID: {patient_id}")
-    return PatientResponse(**patient)
+    return _to_response(patient)
 
 
 @router.delete(
@@ -173,13 +205,16 @@ def update_patient(
 )
 def delete_patient(
     patient_id: str,
-    _token: str = Depends(verify_token),
+    db: Session = Depends(get_db),
+    _user: str = Depends(verify_token),
 ) -> None:
     """删除指定患者的信息。"""
-    if patient_id not in _patient_db:
+    patient = db.query(Patient).filter(Patient.id == patient_id).first()
+    if not patient:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"患者 ID {patient_id} 不存在",
         )
-    del _patient_db[patient_id]
+    db.delete(patient)
+    db.commit()
     logger.info(f"患者信息已删除 | ID: {patient_id}")

@@ -1,0 +1,55 @@
+
+# ─────────────────────────────────────────────────────────────────────────────
+# CHD-MedIA 系统配置文件
+# 修改后重启后端服务生效
+# ─────────────────────────────────────────────────────────────────────────────
+
+database:
+  host: "localhost"
+  port: 3306
+  name: "chd_media"
+  user: "root"
+  password: "123456"   # 请修改为实际数据库密码
+  charset: "utf8mb4"
+  pool_size: 10
+  max_overflow: 20
+
+app:
+  name: "CHD-MedIA 先心病影像检测系统"
+  version: "1.0.0"
+  debug: false
+
+auth:
+  secret_key: "chd-media-jwt-secret-key-change-in-production"  # 生产环境请替换为强随机密钥
+  algorithm: "HS256"
+  access_token_expire_minutes: 480  # 8 小时
+
+# 系统启动时自动创建的管理员账号（账号不存在时才创建）
+admin:
+  username: "admin"
+  password: "admin123"          # 请在首次登录后修改
+  full_name: "系统管理员"
+
+cors:
+  origins:
+    - "http://localhost:5173"
+    - "http://127.0.0.1:5173"
+    - "http://localhost:3000"
+
+upload:
+  dir: "uploads"
+  max_size_mb: 200
+
+ai:
+  dashscope_api_key: ""         # 填入阿里百炼 API Key 以启用 AI 报告生成
+  dashscope_model: "qwen-plus"
+  dashscope_timeout: 60
+  dashscope_max_retries: 3
+
+models:
+  ultrasound_path: "models/ultrasound_yolo.pt"
+  mri_path: "models/best_model.pth"
+
+logging:
+  dir: "logs"
+  level: "INFO"

@@ -42,10 +42,13 @@
           <template #header><span class="card-title">上传 MRI 影像</span></template>
           <ImageUpload
             modality="mri"
-            accept=".png,.jpg,.jpeg,.dcm,.dicom"
+            accept=".png,.jpg,.jpeg,.dcm,.dicom,.nii,.nii.gz"
             @file-selected="onFileSelected"
           />
-          <div v-if="previewSrc" style="margin-top:12px">
+          <div v-if="isNiftiFile" style="margin-top:12px">
+            <el-alert title="NIfTI 文件已加载，暂不支持预览，检测功能开发中" type="info" :closable="false" show-icon />
+          </div>
+          <div v-else-if="previewSrc" style="margin-top:12px">
             <p style="color:#5a7fa0;font-size:13px;margin:0 0 8px">原始影像预览：</p>
             <img :src="previewSrc" style="max-width:100%;border-radius:8px;border:1px solid #e0eaf5" />
           </div>
@@ -67,7 +70,7 @@
           <template #header>
             <span class="card-title">检测结果</span>
             <el-button
-              v-if="selectedFile"
+              v-if="selectedFile && !isNiftiFile"
               type="warning"
               size="small"
               :loading="detecting"
@@ -124,6 +127,11 @@ const dicomMeta = ref(null)
 const detecting = ref(false)
 const detectionResult = ref(null)
 
+const isNiftiFile = computed(() => {
+  const name = (selectedFile.value?.name || '').toLowerCase()
+  return name.endsWith('.nii.gz') || name.endsWith('.nii')
+})
+
 const filteredMeta = computed(() => {
   if (!dicomMeta.value) return {}
   const keys = ['modality', 'patient_name', 'patient_age', 'patient_sex', 'study_date', 'series_description', 'rows', 'columns']
@@ -132,9 +140,12 @@ const filteredMeta = computed(() => {
 
 function onFileSelected({ file, previewBase64, metadata }) {
   selectedFile.value = file
-  previewSrc.value = previewBase64
-    ? `data:image/png;base64,${previewBase64}`
-    : URL.createObjectURL(file)
+  const nifti = file && ((file.name.toLowerCase().endsWith('.nii.gz') || file.name.toLowerCase().endsWith('.nii')))
+  previewSrc.value = nifti || !file
+    ? ''
+    : previewBase64
+      ? `data:image/png;base64,${previewBase64}`
+      : URL.createObjectURL(file)
   dicomMeta.value = metadata || null
   detectionResult.value = null
 }

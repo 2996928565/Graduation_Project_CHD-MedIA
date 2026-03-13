@@ -32,7 +32,7 @@
         <el-table-column prop="created_at" label="录入时间" width="180">
           <template #default="{ row }">{{ formatDate(row.created_at) }}</template>
         </el-table-column>
-        <el-table-column label="操作" width="220">
+        <el-table-column label="操作" width="330">
           <template #default="{ row }">
             <el-button
               size="small"
@@ -45,6 +45,20 @@
               icon="PictureFilled"
               @click="goDetect(row, 'mri')"
             >MRI 检测</el-button>
+            <el-button
+              size="small"
+              type="primary"
+              plain
+              icon="Edit"
+              @click="goEdit(row)"
+            >编辑</el-button>
+            <el-button
+              size="small"
+              type="danger"
+              plain
+              icon="Delete"
+              @click="handleDelete(row)"
+            >删除</el-button>
           </template>
         </el-table-column>
       </el-table>
@@ -55,7 +69,8 @@
 <script setup>
 import { ref, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
-import { getPatients } from '@/api/patients.js'
+import { ElMessage, ElMessageBox } from 'element-plus'
+import { getPatients, deletePatient } from '@/api/patients.js'
 
 const router = useRouter()
 const loading = ref(false)
@@ -83,6 +98,29 @@ function formatDate(iso) {
 function goDetect(patient, modality) {
   const route = modality === 'mri' ? '/mri' : '/ultrasound'
   router.push({ path: route, query: { patientId: patient.patient_id, name: patient.name } })
+}
+
+function goEdit(patient) {
+  router.push(`/patients/${patient.patient_id}/edit`)
+}
+
+async function handleDelete(patient) {
+  try {
+    await ElMessageBox.confirm(
+      `确定要删除患者「${patient.name}」的信息吗？此操作不可恢复。`,
+      '删除确认',
+      { confirmButtonText: '确定删除', cancelButtonText: '取消', type: 'warning' }
+    )
+  } catch {
+    return
+  }
+  try {
+    await deletePatient(patient.patient_id)
+    ElMessage.success('患者信息已删除')
+    patients.value = patients.value.filter(p => p.patient_id !== patient.patient_id)
+  } catch {
+    ElMessage.error('删除失败，请重试')
+  }
 }
 </script>
 

@@ -25,9 +25,15 @@ const routes = [
       },
       {
         path: 'patients/new',
-        name: 'PatientForm',
+        name: 'PatientNew',
         component: () => import('@/views/PatientForm.vue'),
         meta: { title: '新增患者' },
+      },
+      {
+        path: 'patients/:id/edit',
+        name: 'PatientEdit',
+        component: () => import('@/views/PatientForm.vue'),
+        meta: { title: '编辑患者' },
       },
       {
         path: 'ultrasound',

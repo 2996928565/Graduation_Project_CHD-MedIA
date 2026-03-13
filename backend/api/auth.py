@@ -1,67 +1,124 @@
 """
-简易 Token 鉴权模块
-使用 Bearer Token + Header 验证，生产环境建议替换为 JWT。
+JWT 用户名/密码鉴权模块
+使用 bcrypt 存储密码哈希，使用 HS256 JWT 签发访问令牌
 """
-from fastapi import HTTPException, Security, status
+from datetime import datetime, timedelta
+
+from fastapi import Depends, HTTPException, Security, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+from jose import JWTError, jwt
+from passlib.context import CryptContext
+from sqlalchemy.orm import Session
 
 from config.settings import settings
+from db.database import get_db
+from db.models import User
 
 _bearer_scheme = HTTPBearer(auto_error=False)
+_pwd_context = CryptContext(schemes=["pbkdf2_sha256"], deprecated="auto")
+
+
+# ── 密码工具 ──────────────────────────────────────────────────────────────────
+
+def hash_password(password: str) -> str:
+    """生成 bcrypt 密码哈希"""
+    return _pwd_context.hash(password)
+
+
+def verify_password(plain: str, hashed: str) -> bool:
+    """校验明文密码与哈希是否匹配"""
+    return _pwd_context.verify(plain, hashed)
+
+
+# ── JWT 工具 ──────────────────────────────────────────────────────────────────
+
+def create_access_token(username: str) -> str:
+    """签发 JWT 访问令牌"""
+    expire = datetime.utcnow() + timedelta(minutes=settings.token_expire_minutes)
+    payload = {"sub": username, "exp": expire}
+    return jwt.encode(payload, settings.secret_key, algorithm=settings.algorithm)
+
+
+# ── 登录 & 验证 ───────────────────────────────────────────────────────────────
+
+def authenticate_user(db: Session, username: str, password: str) -> User:
+    """
+    验证用户名和密码。
+
+    Raises:
+        HTTPException 401: 用户名或密码错误
+    """
+    user = (
+        db.query(User)
+        .filter(User.username == username, User.is_active == True)
+        .first()
+    )
+    if not user or not verify_password(password, user.password_hash):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="用户名或密码错误",
+        )
+    return user
 
 
 def verify_token(
     credentials: HTTPAuthorizationCredentials = Security(_bearer_scheme),
 ) -> str:
     """
-    验证请求中的 Bearer Token。
-
-    Args:
-        credentials: HTTP Authorization 头中的凭证
-
-    Returns:
-        通过验证的 token 字符串
+    FastAPI 依赖：解析并验证 Bearer JWT，返回用户名。
 
     Raises:
-        HTTPException 401: Token 缺失或无效
+        HTTPException 401: Token 缺失、格式错误或已过期
     """
     if credentials is None or credentials.scheme.lower() != "bearer":
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="缺少认证 Token，请在 Authorization Header 中提供 Bearer Token",
+            detail="缺少认证 Token，请先登录",
             headers={"WWW-Authenticate": "Bearer"},
         )
-
-    if credentials.credentials != settings.secret_token:
+    try:
+        payload = jwt.decode(
+            credentials.credentials,
+            settings.secret_key,
+            algorithms=[settings.algorithm],
+        )
+        username: str = payload.get("sub")
+        if not username:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Token 无效",
+            )
+    except JWTError:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Token 无效或已过期",
+            detail="Token 无效或已过期，请重新登录",
             headers={"WWW-Authenticate": "Bearer"},
         )
+    return username
 
-    return credentials.credentials
 
+# ── 管理员初始化 ───────────────────────────────────────────────────────────────
 
-def get_login_token(token: str) -> dict:
+def init_admin(db: Session) -> bool:
     """
-    登录接口：验证 token 并返回有效期信息。
-
-    Args:
-        token: 用户提交的 token 字符串
+    若管理员账号不存在则自动创建。
+    在应用启动时调用一次。
 
     Returns:
-        包含 access_token 和 token_type 的字典
-
-    Raises:
-        HTTPException 401: Token 不正确
+        True: 新建了管理员账号
+        False: 账号已存在，未做任何变更
     """
-    if token != settings.secret_token:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Token 不正确，请联系管理员获取正确 Token",
-        )
-    return {
-        "access_token": token,
-        "token_type": "bearer",
-        "expire_minutes": settings.token_expire_minutes,
-    }
+    existing = db.query(User).filter(User.username == settings.admin_username).first()
+    if existing:
+        return False
+
+    admin = User(
+        username=settings.admin_username,
+        password_hash=hash_password(settings.admin_password),
+        full_name=settings.admin_full_name,
+        role="admin",
+        is_active=True,
+    )
+    db.add(admin)
+    db.commit()
+    return True

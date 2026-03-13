@@ -14,11 +14,21 @@
         label-position="top"
         @submit.prevent="handleLogin"
       >
-        <el-form-item label="访问 Token" prop="token">
+        <el-form-item label="用户名" prop="username">
           <el-input
-            v-model="form.token"
+            v-model="form.username"
+            placeholder="请输入用户名"
+            size="large"
+            prefix-icon="User"
+            @keyup.enter="handleLogin"
+          />
+        </el-form-item>
+
+        <el-form-item label="密码" prop="password">
+          <el-input
+            v-model="form.password"
             type="password"
-            placeholder="请输入访问 Token"
+            placeholder="请输入密码"
             show-password
             size="large"
             prefix-icon="Lock"
@@ -34,22 +44,10 @@
             style="width: 100%"
             @click="handleLogin"
           >
-            <el-icon><Key /></el-icon>
             登 录
           </el-button>
         </el-form-item>
       </el-form>
-
-      <el-alert
-        type="info"
-        :closable="false"
-        show-icon
-        style="margin-top: 8px"
-      >
-        <template #title>
-          演示 Token：<code>CHD_MEDIA_SECRET_TOKEN</code>
-        </template>
-      </el-alert>
     </div>
   </div>
 </template>
@@ -66,10 +64,11 @@ const authStore = useAuthStore()
 
 const formRef = ref(null)
 const loading = ref(false)
-const form = reactive({ token: '' })
+const form = reactive({ username: '', password: '' })
 
 const rules = {
-  token: [{ required: true, message: '请输入访问 Token', trigger: 'blur' }],
+  username: [{ required: true, message: '请输入用户名', trigger: 'blur' }],
+  password: [{ required: true, message: '请输入密码', trigger: 'blur' }],
 }
 
 async function handleLogin() {
@@ -77,9 +76,9 @@ async function handleLogin() {
     if (!valid) return
     loading.value = true
     try {
-      const res = await login(form.token)
-      authStore.setToken(res.access_token)
-      ElMessage.success('登录成功，欢迎使用 CHD-MedIA 系统')
+      const res = await login(form.username, form.password)
+      authStore.setAuth(res)
+      ElMessage.success(`欢迎回来，${res.full_name || res.username}`)
       router.push('/')
     } catch {
       // 错误已在拦截器统一处理

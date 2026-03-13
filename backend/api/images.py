@@ -27,13 +27,22 @@ MAX_FILE_SIZE = settings.max_upload_size_mb * 1024 * 1024
 
 # ── 辅助函数 ──────────────────────────────────────────────────────────────────
 
+def _is_nifti(filename: str) -> bool:
+    """判断文件是否为 NIfTI 格式（.nii 或 .nii.gz）"""
+    name = (filename or "").lower()
+    return name.endswith(".nii.gz") or name.endswith(".nii")
+
+
 def _validate_file(file: UploadFile) -> None:
     """校验上传文件的格式"""
-    suffix = Path(file.filename or "").suffix.lower()
+    filename = file.filename or ""
+    if _is_nifti(filename):
+        return
+    suffix = Path(filename).suffix.lower()
     if suffix not in ALLOWED_EXTENSIONS:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"不支持的文件格式 '{suffix}'，支持：{', '.join(ALLOWED_EXTENSIONS)}",
+            detail=f"不支持的文件格式 '{suffix}'，支持：{', '.join(ALLOWED_EXTENSIONS)} 以及 .nii/.nii.gz",
         )
 
 
@@ -105,6 +114,12 @@ async def upload_preview(
     filename = file.filename or "unknown"
     is_dcm = _is_dicom(filename, file_bytes)
     metadata = {}
+
+    if _is_nifti(filename):
+        # NIfTI 文件暂不解析，存档后直接返回空预览
+        _save_upload(file_bytes, filename)
+        logger.info(f"NIfTI 文件已接收 | 文件: {filename}")
+        return DicomPreviewResponse(filename=filename, metadata={}, preview_image_base64="")
 
     if is_dcm:
         try:

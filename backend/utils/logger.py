@@ -2,6 +2,7 @@
 日志工具模块
 使用 loguru 进行结构化日志记录，输出到文件（按天轮转）和控制台。
 """
+import io
 import sys
 from loguru import logger
 from config.settings import settings
@@ -11,9 +12,16 @@ def setup_logger() -> None:
     """初始化日志配置"""
     logger.remove()  # 移除默认 handler
 
+    # Windows 下强制 UTF-8 输出，避免 GBK 编码错误
+    stdout_sink = (
+        io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
+        if hasattr(sys.stdout, "buffer")
+        else sys.stdout
+    )
+
     # 控制台输出
     logger.add(
-        sys.stdout,
+        stdout_sink,
         level=settings.log_level,
         format=(
             "<green>{time:YYYY-MM-DD HH:mm:ss}</green> | "
