@@ -9,7 +9,7 @@ database:
   port: 3306
   name: "chd_media"
   user: "root"
-  password: "your_password"   # 请修改为实际数据库密码
+  password: "123456"   # 请修改为实际数据库密码
   charset: "utf8mb4"
   pool_size: 10
   max_overflow: 20

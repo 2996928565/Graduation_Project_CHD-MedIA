@@ -15,7 +15,7 @@ from db.database import get_db
 from db.models import User
 
 _bearer_scheme = HTTPBearer(auto_error=False)
-_pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+_pwd_context = CryptContext(schemes=["pbkdf2_sha256"], deprecated="auto")
 
 
 # ── 密码工具 ──────────────────────────────────────────────────────────────────
