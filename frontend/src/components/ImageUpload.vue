@@ -38,6 +38,7 @@
         {{ (selectedFileInfo.size / 1024).toFixed(1) }} KB
       </el-tag>
       <el-tag v-if="isDicom" type="warning" size="small" style="margin-left:4px">DICOM</el-tag>
+      <el-tag v-if="isNifti" type="info" size="small" style="margin-left:4px">NIfTI</el-tag>
       <el-button
         text
         type="danger"
@@ -51,7 +52,7 @@
     <!-- 加载状态 -->
     <div v-if="loading" class="loading-tip">
       <el-icon class="is-loading"><Loading /></el-icon>
-      {{ isDicom ? '正在解析 DICOM 文件...' : '正在加载影像...' }}
+      {{ isNifti ? '正在上传 NIfTI 文件...' : isDicom ? '正在解析 DICOM 文件...' : '正在加载影像...' }}
     </div>
   </div>
 </template>
@@ -72,6 +73,7 @@ const emit = defineEmits(['file-selected'])
 const uploadRef = ref(null)
 const selectedFileInfo = ref(null)
 const isDicom = ref(false)
+const isNifti = ref(false)
 const loading = ref(false)
 
 async function handleChange(uploadFile) {
@@ -84,8 +86,9 @@ async function handleChange(uploadFile) {
     return
   }
 
-  const ext = file.name.split('.').pop().toLowerCase()
-  isDicom.value = ['dcm', 'dicom'].includes(ext)
+  const nameLower = file.name.toLowerCase()
+  isDicom.value = nameLower.endsWith('.dcm') || nameLower.endsWith('.dicom')
+  isNifti.value = nameLower.endsWith('.nii.gz') || nameLower.endsWith('.nii')
   selectedFileInfo.value = { name: file.name, size: file.size }
   loading.value = true
 
@@ -116,6 +119,7 @@ function handleExceed() {
 function clearFile() {
   selectedFileInfo.value = null
   isDicom.value = false
+  isNifti.value = false
   uploadRef.value?.clearFiles()
   emit('file-selected', { file: null, previewBase64: null, metadata: null })
 }
