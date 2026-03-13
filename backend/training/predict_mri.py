@@ -1,0 +1,204 @@
+"""
+MRI 模型推理脚本（无需标签）
+仅进行预测，保存分割结果
+"""
+import sys
+from pathlib import Path
+import argparse
+
+import torch
+import numpy as np
+import SimpleITK as sitk
+import matplotlib.pyplot as plt
+from tqdm import tqdm
+
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
+from training.model import get_model
+from training.dataset import normalize_intensity, MMWHS_CLASS_NAMES
+
+
+def predict_single_image(model, image_path, device, output_dir):
+    """预测单个图像（无需标签）"""
+    model.eval()
+    
+    # 加载数据
+    case_name = Path(image_path).stem.replace("_image", "")
+    print(f"\n处理: {case_name}")
+    
+    img_sitk = sitk.ReadImage(str(image_path))
+    img_arr = sitk.GetArrayFromImage(img_sitk).astype(np.float32)
+    
+    print(f"图像尺寸: {img_arr.shape}")
+    
+    # 预处理
+    img_arr = normalize_intensity(img_arr)
+    
+    # 转为tensor
+    img_tensor = torch.from_numpy(img_arr).unsqueeze(0).unsqueeze(0).float().to(device)
+    
+    print("开始预测...")
+    with torch.no_grad():
+        output = model(img_tensor)
+        prediction = torch.argmax(output, dim=1).squeeze(0).cpu().numpy()
+    
+    # 统计预测结果
+    print("\n预测统计:")
+    unique, counts = np.unique(prediction, return_counts=True)
+    total_voxels = prediction.size
+    
+    for cls_idx, count in zip(unique, counts):
+        cls_name = MMWHS_CLASS_NAMES[cls_idx] if cls_idx < len(MMWHS_CLASS_NAMES) else f"Unknown-{cls_idx}"
+        percentage = (count / total_voxels) * 100
+        print(f"  {cls_name:<20s}: {count:>10d} voxels ({percentage:>5.2f}%)")
+    
+    # 保存预测结果
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    
+    pred_sitk = sitk.GetImageFromArray(prediction)
+    pred_sitk.CopyInformation(img_sitk)
+    pred_path = output_dir / f"{case_name}_prediction.nii.gz"
+    sitk.WriteImage(pred_sitk, str(pred_path))
+    print(f"\n✓ 预测结果已保存: {pred_path}")
+    
+    # 可视化多个切片
+    vis_dir = output_dir / "visualizations"
+    vis_dir.mkdir(exist_ok=True)
+    
+    n_slices = img_arr.shape[0]
+    slice_indices = [n_slices // 4, n_slices // 2, 3 * n_slices // 4]
+    
+    for slice_idx in slice_indices:
+        fig, axes = plt.subplots(1, 2, figsize=(12, 5))
+        
+        # 原始图像
+        axes[0].imshow(img_arr[slice_idx], cmap='gray')
+        axes[0].set_title(f'Original Image (Slice {slice_idx})')
+        axes[0].axis('off')
+        
+        # 预测结果
+        axes[1].imshow(prediction[slice_idx], cmap='tab10', vmin=0, vmax=7)
+        axes[1].set_title('Prediction')
+        axes[1].axis('off')
+        
+        # 添加颜色图例
+        from matplotlib.patches import Patch
+        legend_elements = [Patch(facecolor=plt.cm.tab10(i/10), label=MMWHS_CLASS_NAMES[i]) 
+                          for i in range(min(8, len(MMWHS_CLASS_NAMES)))]
+        fig.legend(handles=legend_elements, loc='center left', bbox_to_anchor=(1, 0.5))
+        
+        plt.tight_layout()
+        save_path = vis_dir / f"{case_name}_slice_{slice_idx:03d}.png"
+        plt.savefig(save_path, dpi=150, bbox_inches='tight')
+        plt.close()
+        
+        print(f"  ✓ 保存可视化: {save_path.name}")
+    
+    return prediction
+
+
+def predict_batch(model, data_dir, modality, device, output_dir):
+    """批量预测（无需标签）"""
+    model.eval()
+    
+    # 查找图像文件
+    data_dir = Path(data_dir)
+    test_pattern = f"{modality}_test_*_image.nii.gz"
+    
+    test_files = []
+    for search_pattern in [f"*_{modality}_test/{test_pattern}", 
+                          f"{modality}_test/{test_pattern}", 
+                          test_pattern]:
+        test_files = sorted(list(data_dir.glob(search_pattern)))
+        if test_files:
+            break
+    
+    if not test_files:
+        raise FileNotFoundError(
+            f"未找到测试图像！\n"
+            f"搜索路径: {data_dir}\n"
+            f"搜索模式: {test_pattern}"
+        )
+    
+    print(f"\n找到 {len(test_files)} 个测试样本")
+    print(f"数据目录: {data_dir}\n")
+    
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    
+    # 预测每个样本
+    for idx, image_file in enumerate(test_files):
+        print(f"\n[{idx+1}/{len(test_files)}] {'='*50}")
+        predict_single_image(model, str(image_file), device, output_dir)
+    
+    print(f"\n{'='*60}")
+    print(f"✓ 所有预测完成！结果保存在: {output_dir}")
+    print(f"{'='*60}")
+
+
+def main():
+    parser = argparse.ArgumentParser(description="MRI 模型推理（无需标签）")
+    
+    # 模型
+    parser.add_argument("--checkpoint", type=str, required=True,
+                        help="模型checkpoint路径")
+    parser.add_argument("--base_channels", type=int, default=32,
+                        help="模型基础通道数")
+    
+    # 输入：单个文件或批量目录
+    group = parser.add_mutually_exclusive_group(required=True)
+    group.add_argument("--image", type=str,
+                       help="单个图像路径 (*_image.nii.gz)")
+    group.add_argument("--data_dir", type=str,
+                       help="批量预测：数据根目录")
+    
+    parser.add_argument("--modality", type=str, default="mr",
+                        help="模态 (mr 或 ct)")
+    parser.add_argument("--output_dir", type=str, default="predictions",
+                        help="结果保存目录")
+    parser.add_argument("--device", type=str, default="cuda",
+                        help="计算设备")
+    
+    args = parser.parse_args()
+    
+    # 检查模型文件
+    if not Path(args.checkpoint).exists():
+        print(f"错误: 模型文件不存在: {args.checkpoint}")
+        return
+    
+    # 设备
+    device = torch.device(args.device if torch.cuda.is_available() else "cpu")
+    print(f"\n{'='*60}")
+    print(f"使用设备: {device}")
+    print(f"{'='*60}")
+    
+    # 加载模型
+    print("\n加载模型...")
+    model = get_model(num_classes=8, base_channels=args.base_channels)
+    checkpoint = torch.load(args.checkpoint, map_location=device, weights_only=False)
+    model.load_state_dict(checkpoint['model_state_dict'])
+    model = model.to(device)
+    
+    if 'best_dice' in checkpoint:
+        print(f"模型训练最佳Dice: {checkpoint['best_dice']:.4f}")
+    if 'epoch' in checkpoint:
+        print(f"训练轮数: {checkpoint['epoch']}")
+    
+    # 预测
+    if args.image:
+        # 单个文件预测
+        if not Path(args.image).exists():
+            print(f"错误: 图像文件不存在: {args.image}")
+            return
+        
+        predict_single_image(model, args.image, device, args.output_dir)
+    else:
+        # 批量预测
+        predict_batch(model, args.data_dir, args.modality, device, args.output_dir)
+    
+    print(f"\n✓ 完成！结果保存在: {args.output_dir}")
+
+
+if __name__ == "__main__":
+    main()

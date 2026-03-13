@@ -193,8 +193,69 @@ Authorization: Bearer CHD_MEDIA_SECRET_TOKEN
 ### 模型训练参考
 
 - 超声数据集：CAMUS, EchoNet-Dynamic
-- MRI 数据集：ACDC (Automated Cardiac Diagnosis Challenge), M&Ms
+- MRI 数据集：ACDC (Automated Cardiac Diagnosis Challenge), M&Ms, **MM-WHS 2017**
 - 推荐框架：PyTorch + torchvision (Faster R-CNN), segmentation_models_pytorch (U-Net)
+
+### 模型测试与推理
+
+如果你已经训练好了 MRI 模型（如 `backend/models/best_model.pth`），可以使用以下工具：
+
+#### 1. 推理（给新图像做分割，无需标签）
+
+**Windows 批处理（推荐）**：
+```bash
+# 单个样本
+predict_single.bat
+
+# 批量处理
+predict_batch.bat
+```
+
+**命令行方式**：
+```bash
+conda activate gra_311
+
+# 单个图像
+python backend/training/predict_mri.py \
+    --checkpoint backend/models/best_model.pth \
+    --image E:\BaiduNetdiskDownload\mr_test\mr_test_2001_image.nii.gz \
+    --base_channels 32
+
+# 批量预测
+python backend/training/predict_mri.py \
+    --checkpoint backend/models/best_model.pth \
+    --data_dir E:\BaiduNetdiskDownload \
+    --modality mr \
+    --base_channels 32
+```
+
+**详细文档**：[PREDICT_GUIDE.md](backend/training/PREDICT_GUIDE.md)
+
+#### 2. 测试（评估模型性能，需要标签）
+
+**Windows 用户**：
+```bash
+backend\training\test_model.bat
+```
+
+**命令行方式**：
+```bash
+python backend/training/test_mri.py \
+    --checkpoint backend/models/best_model.pth \
+    --data_dir E:\BaiduNetdiskDownload \
+    --base_channels 32 \
+    --modality mr \
+    --save_predictions
+```
+
+**输出结果**：
+- Dice 等性能指标
+- 可视化对比图
+- 预测的 NIfTI 文件
+
+**详细文档**：[TEST_MODEL.md](backend/training/TEST_MODEL.md)
+
+**云端训练**：如需在 AutoDL 等云平台训练模型，请参考 [CLOUD_TRAINING.md](backend/training/CLOUD_TRAINING.md)
 
 ---
 

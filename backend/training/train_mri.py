@@ -128,12 +128,7 @@ def train(args):
     
     # 数据加载
     print("\n=== 加载数据 ===")
-    if args.use_separate_testset:
-        print(f"使用独立数据集:")
-        print(f"  训练集: {args.data_dir}/{args.modality}_train/")
-        print(f"  验证集: {args.data_dir}/{args.modality}_test/")
-    else:
-        print(f"从训练集随机划分 ({args.train_ratio:.0%} 训练 / {1-args.train_ratio:.0%} 验证)")
+    print(f"从训练集随机划分 ({args.train_ratio:.0%} 训练 / {1-args.train_ratio:.0%} 验证)")
     
     train_loader, val_loader = get_dataloaders(
         data_dir=args.data_dir,
@@ -142,7 +137,6 @@ def train(args):
         crop_size=tuple(args.crop_size),
         num_workers=args.num_workers,
         train_ratio=args.train_ratio,
-        use_separate_testset=args.use_separate_testset,
     )
     
     # 模型
@@ -237,15 +231,13 @@ def main():
     
     # 数据
     parser.add_argument("--data_dir", type=str, default=r"E:\BaiduNetdiskDownload",
-                        help="数据根目录（包含 mr_train/ 和 mr_test/ 文件夹）")
+                        help="数据根目录（包含 mr_train/ 文件夹）")
     parser.add_argument("--modality", type=str, default="mr", choices=["mr", "ct"],
                         help="模态选择")
     parser.add_argument("--crop_size", type=int, nargs=3, default=[64, 128, 128],
                         help="3D patch大小 (D H W)")
     parser.add_argument("--train_ratio", type=float, default=0.8,
-                        help="训练集比例（仅在不使用独立测试集时生效）")
-    parser.add_argument("--use_separate_testset", action="store_true",
-                        help="使用独立的 mr_test/ 作为验证集（推荐）")
+                        help="训练集比例，从 mr_train/ 按此比例划分训练集和验证集")
     
     # 模型
     parser.add_argument("--num_classes", type=int, default=8,

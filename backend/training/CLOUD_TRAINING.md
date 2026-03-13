@@ -66,17 +66,12 @@ python -c "import torch; print(f'GPU: {torch.cuda.get_device_name(0)}')"
 # 假设数据已上传到 /root/autodl-tmp/mmwhs_data/
 # 数据结构应该是：
 # /root/autodl-tmp/mmwhs_data/
-# ├── mr_train/  (训练集)
-# │   ├── mr_train_1001_image.nii.gz
-# │   ├── mr_train_1001_label.nii.gz
-# │   └── ...
-# └── mr_test/   (测试集/验证集)
-#     ├── mr_test_2001_image.nii.gz
-#     ├── mr_test_2001_label.nii.gz
+# └── mr_train/  (训练集，含图像和标注，内部按 train_ratio 划分训练/验证集)
+#     ├── mr_train_1001_image.nii.gz
+#     ├── mr_train_1001_label.nii.gz
 #     └── ...
 
 ls /root/autodl-tmp/mmwhs_data/mr_train/
-ls /root/autodl-tmp/mmwhs_data/mr_test/
 
 # 验证数据
 python backend/tools/test_nifti_reader.py \
@@ -98,7 +93,6 @@ nohup python backend/training/train_mri.py \
     --lr 0.001 \
     --num_workers 8 \
     --device cuda \
-    --use_separate_testset \
     > train.log 2>&1 &
 
 # 查看训练日志
@@ -113,8 +107,7 @@ python backend/training/train_mri.py \
     --batch_size 2 \
     --base_channels 32 \
     --epochs 200 \
-    --device cuda \
-    --use_separate_testset
+    --device cuda
 # 按 Ctrl+B 然后 D 退出tmux，训练继续
 # 重新连接：tmux attach -t train
 ```
@@ -180,8 +173,7 @@ ossutil cp -r oss://your-bucket/mmwhs_data /mnt/data/ --recursive
 ```bash
 python backend/training/train_mri.py \
     --data_dir /mnt/data/mmwhs_data \
-    --device cuda \
-    --use_separate_testset
+    --device cuda
 ```
 
 ---
@@ -218,8 +210,7 @@ drive.mount('/content/drive')
     --batch_size 2 \
     --base_channels 16 \
     --epochs 200 \
-    --device cuda \
-    --use_separate_testset
+    --device cuda
 
 # ===== Cell 5: 下载模型 =====
 from google.colab import files
@@ -362,8 +353,7 @@ tmux new -d -s train "python backend/training/train_mri.py \
     --batch_size 2 \
     --base_channels 32 \
     --epochs 200 \
-    --device cuda \
-    --use_separate_testset; bash"
+    --device cuda; bash"
 
 # 6. 启动TensorBoard
 tmux new -d -s tensorboard "tensorboard --logdir backend/training/checkpoints --bind_all --port 6006; bash"
