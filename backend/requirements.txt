@@ -6,6 +6,11 @@ python-jose[cryptography]==3.3.0
 passlib[bcrypt]==1.7.4
 httpx==0.27.0
 
+# Database
+SQLAlchemy==2.0.30
+PyMySQL==1.1.1
+cryptography==42.0.8       # PyMySQL SSL 支持
+
 # Data validation
 pydantic==2.7.4
 pydantic-settings==2.3.3

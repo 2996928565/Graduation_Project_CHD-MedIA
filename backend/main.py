@@ -2,7 +2,7 @@
 CHD-MedIA 后端主入口
 基于深度学习的先心病影像异常检测与报告生成系统 - FastAPI Web 服务
 """
-from fastapi import FastAPI, HTTPException, status, Depends
+from fastapi import FastAPI, Depends, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
@@ -11,10 +11,14 @@ from pydantic import BaseModel
 import utils.logger  # noqa: F401
 
 from config.settings import settings
-from api.auth import get_login_token
+from api.auth import authenticate_user, create_access_token, init_admin
 from api.patients import router as patients_router
 from api.images import router as images_router
 from api.reports import router as reports_router
+from db.database import engine, get_db
+from db.models import User, Patient  # noqa: F401 — 确保建表时模型已注册
+import db.database as _db_module
+from sqlalchemy.orm import Session
 from loguru import logger
 
 
@@ -30,8 +34,8 @@ app = FastAPI(
         "- **影像检测**：超声/MRI 影像上传、DICOM 解析、异常区域检测\n"
         "- **报告生成**：对接阿里百炼 NLG API，生成符合临床规范的诊断报告\n\n"
         "## 认证方式\n"
-        "所有接口需在 Authorization Header 中携带 `Bearer <TOKEN>`。\n"
-        "默认 Token: `CHD_MEDIA_SECRET_TOKEN`（生产环境请通过环境变量 `SECRET_TOKEN` 配置）。"
+        "所有接口需在 Authorization Header 中携带 `Bearer <JWT>`，\n"
+        "先通过 `POST /api/v1/auth/login` 获取令牌。"
     ),
     docs_url="/docs",
     redoc_url="/redoc",
@@ -60,21 +64,31 @@ app.include_router(reports_router, prefix="/api/v1")
 # ── 认证接口 ──────────────────────────────────────────────────────────────────
 
 class LoginRequest(BaseModel):
-    token: str
+    username: str
+    password: str
 
 
 @app.post(
     "/api/v1/auth/login",
     tags=["认证"],
-    summary="Token 登录",
+    summary="用户名密码登录",
 )
-def login(request: LoginRequest):
+def login(request: LoginRequest, db: Session = Depends(get_db)):
     """
-    验证 Token 并获取认证信息。
+    使用用户名和密码登录，返回 JWT 访问令牌。
 
-    **演示 Token**: `CHD_MEDIA_SECRET_TOKEN`
+    默认管理员账号由 config.yaml 中的 admin 配置项在启动时自动创建。
     """
-    return get_login_token(request.token)
+    user = authenticate_user(db, request.username, request.password)
+    token = create_access_token(user.username)
+    return {
+        "access_token": token,
+        "token_type": "bearer",
+        "expire_minutes": settings.token_expire_minutes,
+        "username": user.username,
+        "full_name": user.full_name,
+        "role": user.role,
+    }
 
 
 # ── 健康检查 ──────────────────────────────────────────────────────────────────
@@ -116,6 +130,25 @@ async def global_exception_handler(request, exc):
 @app.on_event("startup")
 async def startup_event():
     logger.info(f"{settings.app_name} v{settings.app_version} 启动中...")
+
+    # 建表（若表不存在则自动创建）
+    _db_module.Base.metadata.create_all(bind=engine)
+    logger.info("数据库表结构已同步")
+
+    # 初始化管理员账号
+    db = _db_module.SessionLocal()
+    try:
+        created = init_admin(db)
+        if created:
+            logger.info(
+                f"管理员账号已创建 | 用户名: {settings.admin_username} "
+                f"| 请登录后及时修改密码"
+            )
+        else:
+            logger.info(f"管理员账号已存在 | 用户名: {settings.admin_username}")
+    finally:
+        db.close()
+
     logger.info(f"   Swagger UI: http://127.0.0.1:8000/docs")
     logger.info(f"   DashScope API: {'已配置' if settings.dashscope_api_key else '未配置（演示模式）'}")
 

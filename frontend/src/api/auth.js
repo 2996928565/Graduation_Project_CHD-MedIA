@@ -1,6 +1,6 @@
 import request from './request.js'
 
-/** Token 登录 */
-export function login(token) {
-  return request.post('/auth/login', { token })
+/** 用户名密码登录 */
+export function login(username, password) {
+  return request.post('/auth/login', { username, password })
 }

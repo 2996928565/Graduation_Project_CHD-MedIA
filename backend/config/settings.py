@@ -1,66 +1,86 @@
 """
-CHD-MedIA 后端配置文件
-使用 pydantic-settings 管理环境变量，支持 .env 文件
+CHD-MedIA 后端配置
+从项目根目录 config.yaml 读取所有配置项
 """
-from pydantic_settings import BaseSettings
-from pydantic import Field
-from functools import lru_cache
 import os
+from pathlib import Path
+import yaml
+
+# config.yaml 位于项目根目录（backend/ 的上两层）
+_CONFIG_PATH = Path(__file__).parent.parent.parent / "config.yaml"
 
 
-class Settings(BaseSettings):
-    # ── 应用基础配置 ──────────────────────────────────────────────
-    app_name: str = "CHD-MedIA 先心病影像检测系统"
-    app_version: str = "1.0.0"
-    debug: bool = False
+def _load_yaml() -> dict:
+    if _CONFIG_PATH.exists():
+        with open(_CONFIG_PATH, "r", encoding="utf-8") as f:
+            return yaml.safe_load(f) or {}
+    return {}
 
-    # ── 安全 / 认证 ──────────────────────────────────────────────
-    # 简易 Token（生产环境请替换为强随机字符串，并通过环境变量注入）
-    secret_token: str = Field(default="CHD_MEDIA_SECRET_TOKEN", env="SECRET_TOKEN")
-    token_expire_minutes: int = 480  # 8 小时
+
+_cfg = _load_yaml()
+_db = _cfg.get("database", {})
+_app = _cfg.get("app", {})
+_auth = _cfg.get("auth", {})
+_admin = _cfg.get("admin", {})
+_cors = _cfg.get("cors", {})
+_upload = _cfg.get("upload", {})
+_ai = _cfg.get("ai", {})
+_models_cfg = _cfg.get("models", {})
+_logging = _cfg.get("logging", {})
+
+
+class Settings:
+    # ── 应用 ─────────────────────────────────────────────────────
+    app_name: str = _app.get("name", "CHD-MedIA 先心病影像检测系统")
+    app_version: str = _app.get("version", "1.0.0")
+    debug: bool = _app.get("debug", False)
+
+    # ── 数据库 ───────────────────────────────────────────────────
+    db_host: str = _db.get("host", "localhost")
+    db_port: int = _db.get("port", 3306)
+    db_name: str = _db.get("name", "chd_media")
+    db_user: str = _db.get("user", "root")
+    db_password: str = _db.get("password", "")
+    db_charset: str = _db.get("charset", "utf8mb4")
+    db_pool_size: int = _db.get("pool_size", 10)
+    db_max_overflow: int = _db.get("max_overflow", 20)
+
+    # ── JWT 认证 ─────────────────────────────────────────────────
+    secret_key: str = _auth.get("secret_key", "chd-media-secret")
+    algorithm: str = _auth.get("algorithm", "HS256")
+    token_expire_minutes: int = _auth.get("access_token_expire_minutes", 480)
+
+    # ── 管理员初始账号 ───────────────────────────────────────────
+    admin_username: str = _admin.get("username", "admin")
+    admin_password: str = _admin.get("password", "admin123")
+    admin_full_name: str = _admin.get("full_name", "系统管理员")
 
     # ── CORS ─────────────────────────────────────────────────────
-    cors_origins: list[str] = [
-        "http://localhost:5173",
-        "http://127.0.0.1:5173",
-        "http://localhost:3000",
-    ]
+    cors_origins: list = _cors.get(
+        "origins",
+        ["http://localhost:5173", "http://127.0.0.1:5173", "http://localhost:3000"],
+    )
 
     # ── 文件上传 ─────────────────────────────────────────────────
-    upload_dir: str = "uploads"
-    max_upload_size_mb: int = 200  # 单文件最大 200 MB
+    upload_dir: str = _upload.get("dir", "uploads")
+    max_upload_size_mb: int = _upload.get("max_size_mb", 200)
 
-    # ── 阿里百炼（通义千问）API ───────────────────────────────────
-    # 密钥通过环境变量注入，绝不写入代码
-    dashscope_api_key: str = Field(default="", env="DASHSCOPE_API_KEY")
-    dashscope_model: str = "qwen-plus"
-    dashscope_timeout: int = 60  # 秒
-    dashscope_max_retries: int = 3
+    # ── 阿里百炼 ─────────────────────────────────────────────────
+    dashscope_api_key: str = _ai.get("dashscope_api_key", "")
+    dashscope_model: str = _ai.get("dashscope_model", "qwen-plus")
+    dashscope_timeout: int = _ai.get("dashscope_timeout", 60)
+    dashscope_max_retries: int = _ai.get("dashscope_max_retries", 3)
 
     # ── 模型路径 ─────────────────────────────────────────────────
-    ultrasound_model_path: str = Field(
-        default="models/ultrasound_yolo.pt",
-        env="ULTRASOUND_MODEL_PATH",
-    )
-    mri_model_path: str = Field(
-        default="models/mri_unet.pth",
-        env="MRI_MODEL_PATH",
-    )
+    ultrasound_model_path: str = _models_cfg.get("ultrasound_path", "models/ultrasound_yolo.pt")
+    mri_model_path: str = _models_cfg.get("mri_path", "models/best_model.pth")
 
     # ── 日志 ─────────────────────────────────────────────────────
-    log_dir: str = "logs"
-    log_level: str = "INFO"
-
-    model_config = {"env_file": ".env", "env_file_encoding": "utf-8"}
+    log_dir: str = _logging.get("dir", "logs")
+    log_level: str = _logging.get("level", "INFO")
 
 
-@lru_cache()
-def get_settings() -> Settings:
-    """返回全局唯一配置实例（缓存）"""
-    return Settings()
-
-
-settings = get_settings()
+settings = Settings()
 
 # 确保必要目录存在
 os.makedirs(settings.upload_dir, exist_ok=True)
