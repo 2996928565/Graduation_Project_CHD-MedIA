@@ -48,6 +48,8 @@ class PatientUpdate(BaseModel):
     name: Optional[str] = Field(None, min_length=1, max_length=50)
     age: Optional[int] = Field(None, ge=0, le=150)
     sex: Optional[str] = Field(None, pattern="^(男|女|未知)$")
+    id_number: Optional[str] = None
+    contact: Optional[str] = None
     chd_risk_factors: Optional[List[str]] = None
     exam_modality: Optional[str] = Field(None, pattern="^(ultrasound|mri|both)$")
     chief_complaint: Optional[str] = None
@@ -62,6 +64,8 @@ class PatientResponse(BaseModel):
     name: str
     age: int
     sex: str
+    id_number: Optional[str]
+    contact: Optional[str]
     chd_risk_factors: List[str]
     exam_modality: str
     chief_complaint: Optional[str]
@@ -81,6 +85,8 @@ def _to_response(p: Patient) -> PatientResponse:
         name=p.name,
         age=p.age,
         sex=p.sex,
+        id_number=p.id_number,
+        contact=p.contact,
         chd_risk_factors=p.chd_risk_factors or [],
         exam_modality=p.exam_modality,
         chief_complaint=p.chief_complaint,
