@@ -1,9 +1,15 @@
 """
 NIfTI image + label reading test script (MM-WHS 2017)
 Usage:
+    # With label (segmentation ground truth):
     python backend/tools/test_nifti_reader.py \
         --image path/to/mr_train_1001_image.nii.gz \
         --label path/to/mr_train_1001_label.nii.gz \
+        --out_dir backend/tools/output_slices
+
+    # Without label (image-only):
+    python backend/tools/test_nifti_reader.py \
+        --image path/to/patient_scan.nii.gz \
         --out_dir backend/tools/output_slices
 """
 
@@ -39,7 +45,7 @@ def load_nifti(path: str) -> sitk.Image:
     return img
 
 
-def print_info(img: sitk.Image, name: str) -> None:
+def print_info(img: sitk.Image, name: str, is_label: bool = False) -> None:
     """Print basic metadata for an image or label volume."""
     arr = sitk.GetArrayFromImage(img)  # shape: (D, H, W)
     print(f"\n{'─'*60}")
@@ -50,7 +56,7 @@ def print_info(img: sitk.Image, name: str) -> None:
     print(f"  Origin               : {img.GetOrigin()}")
     print(f"  Direction            : {img.GetDirection()}")
     print(f"  Intensity range      : min={arr.min():.2f}  max={arr.max():.2f}")
-    if "label" in name.lower():
+    if is_label:
         unique = np.unique(arr)
         print(f"  Label values (unique): {unique}")
         for v in unique:
@@ -118,15 +124,14 @@ def label_to_rgb(label_slice: np.ndarray) -> np.ndarray:
 
 def save_sample_slices(
     img_arr: np.ndarray,
-    lbl_arr: np.ndarray,
+    lbl_arr: np.ndarray | None,
     out_dir: Path,
     n_slices: int = 5,
 ) -> None:
     """
-    Sample n_slices axial slices at equal intervals and save three panels:
-      - raw grayscale
-      - colour-coded label
-      - overlay (grayscale + semi-transparent label)
+    Sample n_slices axial slices at equal intervals and save panels:
+      - If lbl_arr is provided: raw grayscale, colour-coded label, overlay
+      - If lbl_arr is None: only raw grayscale
     """
     if not HAS_MPL:
         print("[WARN] Skipping slice export (matplotlib not available)")
@@ -135,53 +140,70 @@ def save_sample_slices(
     out_dir.mkdir(parents=True, exist_ok=True)
     depth = img_arr.shape[0]
 
-    # Only sample slices that actually contain labelled structures (non-background)
-    labelled_slices = [i for i in range(depth) if np.any(lbl_arr[i] > 0)]
-    if len(labelled_slices) == 0:
-        print("[WARN] No labelled slices found, falling back to full range.")
-        labelled_slices = list(range(depth))
-    print(f"  {len(labelled_slices)}/{depth} slices contain labels "
-          f"(slice {labelled_slices[0]} ~ {labelled_slices[-1]})")
+    # Determine which slices to sample
+    if lbl_arr is not None:
+        # Only sample slices that actually contain labelled structures (non-background)
+        labelled_slices = [i for i in range(depth) if np.any(lbl_arr[i] > 0)]
+        if len(labelled_slices) == 0:
+            print("[WARN] No labelled slices found, falling back to full range.")
+            labelled_slices = list(range(depth))
+        print(f"  {len(labelled_slices)}/{depth} slices contain labels "
+              f"(slice {labelled_slices[0]} ~ {labelled_slices[-1]})")
+        sample_pool = labelled_slices
+    else:
+        # No label, sample from middle 80% of volume to skip empty edge slices
+        start = int(depth * 0.1)
+        end = int(depth * 0.9)
+        sample_pool = list(range(start, end))
+        print(f"  Sampling from slices {start} ~ {end} ({len(sample_pool)} slices)")
 
-    # Evenly sample n_slices from the labelled range
-    pick = np.linspace(0, len(labelled_slices) - 1, n_slices, dtype=int)
-    indices = [labelled_slices[p] for p in pick]
+    # Evenly sample n_slices from the pool
+    pick = np.linspace(0, len(sample_pool) - 1, n_slices, dtype=int)
+    indices = [sample_pool[p] for p in pick]
 
     # Percentile clip normalisation (avoids extreme values dominating window)
     p1, p99 = np.percentile(img_arr, 1), np.percentile(img_arr, 99)
     img_norm = np.clip((img_arr - p1) / (p99 - p1 + 1e-8), 0, 1)
 
     for idx in indices:
-        img_slice = img_norm[idx]                      # (H, W) float [0,1]
-        lbl_slice = lbl_arr[idx]                       # (H, W) original MM-WHS values
-        lbl_remap = remap_mmwhs_labels(lbl_slice)      # (H, W) 0-7
+        img_slice = img_norm[idx]  # (H, W) float [0,1]
 
-        lbl_rgb = label_to_rgb(lbl_slice)
+        if lbl_arr is not None:
+            # With label: show 3 panels (grayscale, label, overlay)
+            lbl_slice = lbl_arr[idx]  # (H, W) original MM-WHS values
+            lbl_remap = remap_mmwhs_labels(lbl_slice)  # (H, W) 0-7
+            lbl_rgb = label_to_rgb(lbl_slice)
 
-        fig, axes = plt.subplots(1, 3, figsize=(14, 5))
-        axes[0].imshow(img_slice, cmap="gray", vmin=0, vmax=1)
-        axes[0].set_title(f"Grayscale  slice={idx}")
-        axes[0].axis("off")
+            fig, axes = plt.subplots(1, 3, figsize=(14, 5))
+            axes[0].imshow(img_slice, cmap="gray", vmin=0, vmax=1)
+            axes[0].set_title(f"Grayscale  slice={idx}")
+            axes[0].axis("off")
 
-        axes[1].imshow(lbl_rgb)
-        axes[1].set_title(f"Label (colour)  slice={idx}")
-        axes[1].axis("off")
+            axes[1].imshow(lbl_rgb)
+            axes[1].set_title(f"Label (colour)  slice={idx}")
+            axes[1].axis("off")
 
-        axes[2].imshow(img_slice, cmap="gray", vmin=0, vmax=1)
-        axes[2].imshow(lbl_rgb, alpha=0.4)
-        axes[2].set_title(f"Overlay  slice={idx}")
-        axes[2].axis("off")
+            axes[2].imshow(img_slice, cmap="gray", vmin=0, vmax=1)
+            axes[2].imshow(lbl_rgb, alpha=0.4)
+            axes[2].set_title(f"Overlay  slice={idx}")
+            axes[2].axis("off")
 
-        # Legend with anatomical names
-        unique_vals = np.unique(lbl_slice)
-        patches = []
-        for v in unique_vals:
-            color = LABEL_COLORS.get(int(v), (1, 1, 1))
-            anat = MMWHS_LABEL_MAP.get(int(v), (0, 0, 0, f"unknown {int(v)}"))[3]
-            patches.append(mpatches.Patch(color=color, label=anat))
-        if patches:
-            axes[1].legend(handles=patches, loc="lower right",
-                           fontsize=7, framealpha=0.6)
+            # Legend with anatomical names
+            unique_vals = np.unique(lbl_slice)
+            patches = []
+            for v in unique_vals:
+                color = LABEL_COLORS.get(int(v), (1, 1, 1))
+                anat = MMWHS_LABEL_MAP.get(int(v), (0, 0, 0, f"unknown {int(v)}"))[3]
+                patches.append(mpatches.Patch(color=color, label=anat))
+            if patches:
+                axes[1].legend(handles=patches, loc="lower right",
+                               fontsize=7, framealpha=0.6)
+        else:
+            # Without label: show only grayscale image
+            fig, ax = plt.subplots(1, 1, figsize=(6, 6))
+            ax.imshow(img_slice, cmap="gray", vmin=0, vmax=1)
+            ax.set_title(f"MRI Slice {idx}/{depth-1}")
+            ax.axis("off")
 
         plt.tight_layout()
         out_path = out_dir / f"slice_{idx:04d}.png"
@@ -198,8 +220,8 @@ def save_sample_slices(
 
 def main():
     parser = argparse.ArgumentParser(description="NIfTI image & label reading test (MM-WHS 2017)")
-    parser.add_argument("--image", help="Path to *_image.nii.gz")
-    parser.add_argument("--label", help="Path to *_label.nii.gz")
+    parser.add_argument("--image", required=True, help="Path to *_image.nii.gz")
+    parser.add_argument("--label", default=None, help="Path to *_label.nii.gz (optional)")
     parser.add_argument("--out_dir", default="backend/tools/output_slices",
                         help="Output directory for slice images (default: backend/tools/output_slices)")
     parser.add_argument("--n_slices", type=int, default=5,
@@ -207,34 +229,41 @@ def main():
     args = parser.parse_args()
 
     print("\n=== Loading volumes ===")
-    img_sitk = load_nifti(r"E:\BaiduNetdiskDownload\mr_train\mr_train_1001_image.nii.gz")
-    lbl_sitk = load_nifti(r"E:\BaiduNetdiskDownload\mr_train\mr_train_1001_label.nii.gz")
+    img_sitk = load_nifti(args.image)
+    print_info(img_sitk, "Image", is_label=False)
 
-    print_info(img_sitk, "Image")
-    print_info(lbl_sitk, "Label")
+    lbl_sitk = None
+    lbl_arr = None
+    if args.label:
+        lbl_sitk = load_nifti(args.label)
+        print_info(lbl_sitk, "Label", is_label=True)
 
-    # Shape consistency check
-    img_arr = sitk.GetArrayFromImage(img_sitk)
-    lbl_arr = sitk.GetArrayFromImage(lbl_sitk)
-    if img_arr.shape[:3] != lbl_arr.shape[:3]:
-        print(f"\n[ERROR] Shape mismatch: image={img_arr.shape}  label={lbl_arr.shape}")
-        sys.exit(1)
+        # Shape consistency check
+        img_arr = sitk.GetArrayFromImage(img_sitk)
+        lbl_arr = sitk.GetArrayFromImage(lbl_sitk)
+        if img_arr.shape[:3] != lbl_arr.shape[:3]:
+            print(f"\n[ERROR] Shape mismatch: image={img_arr.shape}  label={lbl_arr.shape}")
+            sys.exit(1)
+        else:
+            print(f"\n[OK] Shapes match: {img_arr.shape[:3]}")
+
+        # Show remapped labels
+        lbl_remap_full = remap_mmwhs_labels(lbl_arr)
+        print(f"\n[Remapped unique values (for training)]: {np.unique(lbl_remap_full)}")
     else:
-        print(f"\n[OK] Shapes match: {img_arr.shape[:3]}")
-
-    # Show remapped labels
-    lbl_remap_full = remap_mmwhs_labels(lbl_arr)
-    print(f"\n[Remapped unique values (for training)]: {np.unique(lbl_remap_full)}")
+        print("\n[INFO] No label file provided, processing image only.")
+        img_arr = sitk.GetArrayFromImage(img_sitk)
 
     print("\n=== Saving representative axial slices ===")
     save_sample_slices(img_arr, lbl_arr, Path(args.out_dir), args.n_slices)
 
     print("\n=== Done ===")
-    print("\n─── MM-WHS 2017 usage notes ─────────────────────────────────")
-    print(" Training : call remap_mmwhs_labels() to convert labels to 0-7")
-    print(" Eval     : model outputs 0-7 -> reverse-lookup MMWHS_REMAP for original values")
-    print(" Dataset  : 20 MR + 20 CT training cases, 7 cardiac structures")
-    print("─────────────────────────────────────────────────────────────")
+    if args.label:
+        print("\n─── MM-WHS 2017 usage notes ─────────────────────────────────")
+        print(" Training : call remap_mmwhs_labels() to convert labels to 0-7")
+        print(" Eval     : model outputs 0-7 -> reverse-lookup MMWHS_REMAP for original values")
+        print(" Dataset  : 20 MR + 20 CT training cases, 7 cardiac structures")
+        print("─────────────────────────────────────────────────────────────")
 
 
 if __name__ == "__main__":
