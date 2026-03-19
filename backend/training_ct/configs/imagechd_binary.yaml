@@ -1,0 +1,63 @@
+# ImageCHD 二分类分割配置
+# 用于病灶检测（病灶 vs 背景）
+
+experiment:
+  name: "imagechd_ct_binary"
+  description: "Binary cardiac lesion segmentation"
+  seed: 42
+
+data:
+  data_dir: "/path/to/ImageCHD"
+  file_pattern: "*_image.nii.gz"
+  label_pattern: "*_label.nii.gz"
+
+  # 二分类分割：将所有心脏结构合并为“病灶”类别
+  # 选项 1：如果 ImageCHD 本身就是二分类标签（0=背景，1=病灶）
+  label_map:
+    0: 0  # 背景
+    1: 1  # 病灶（任意心脏异常）
+
+  num_classes: 2
+
+  class_names:
+    - "Background"
+    - "Lesion"
+
+  ct_preprocessing:
+    window_center: 150
+    window_width: 500
+    clip_range: [-1000, 1000]
+
+  crop_size: [64, 128, 128]
+
+  split:
+    mode: "ratio"
+    train_ratio: 0.8
+
+  augmentation:
+    enabled: true
+
+  num_workers: 4
+
+model:
+  base_channels: 16  # 二分类任务可使用更轻量的模型
+
+training:
+  epochs: 150         # May converge faster for binary task
+  batch_size: 2
+  optimizer:
+    lr: 0.001
+    weight_decay: 0.00001
+  loss:
+    ce_weight: 0.5
+    dice_weight: 0.5
+  scheduler:
+    patience: 10
+  mixed_precision: true
+
+checkpoint:
+  save_dir: "backend/training_ct/checkpoints"
+  save_interval: 20
+
+hardware:
+  device: "cuda"

@@ -1,0 +1,162 @@
+# 自定义 ImageCHD 配置模板
+# 请复制并修改此模板以适配你的 ImageCHD 数据集
+
+experiment:
+  name: "imagechd_ct_custom"
+  description: "Custom configuration for ImageCHD dataset"
+  seed: 42
+
+data:
+  # ========== 必填：设置你的数据目录 ==========
+  data_dir: "/path/to/your/ImageCHD/dataset"
+
+  # ========== 文件模式：根据你的命名方式调整 ==========
+  # 示例：
+  #   - "*_image.nii.gz" and "*_label.nii.gz"
+  #   - "*_ct.nii.gz" and "*_seg.nii.gz"
+  #   - "*.nii.gz" (if labels are in separate directory)
+  file_pattern: "*_image.nii.gz"
+  label_pattern: "*_label.nii.gz"
+
+  # ========== 标签映射：三种选择 ==========
+  # 选项 1：自动检测（首次运行推荐）
+  label_map: null
+  num_classes: null
+
+  # 选项 2：顺序标签（如果你的数据集使用 0, 1, 2, 3, ...）
+  # label_map:
+  #   0: 0  # 背景
+  #   1: 1  # 类别 1
+  #   2: 2  # 类别 2
+  #   3: 3  # 类别 3
+  # num_classes: 4
+
+  # 选项 3：稀疏标签（如果你的数据集使用非连续数值）
+  # label_map:
+  #   0: 0    # 背景
+  #   100: 1  # 左心室
+  #   200: 2  # 右心室
+  #   500: 3  # 左心房
+  # num_classes: 4
+
+  # 类别名称（请更新为与你的类别一致）
+  class_names:
+    - "Background"
+    - "结构 1"
+    - "结构 2"
+    - "结构 3"
+    - "结构 4"
+    - "结构 5"
+    - "结构 6"
+    - "结构 7"
+
+  # CT 预处理（根据你的 CT 协议调整）
+  ct_preprocessing:
+    window_center: 150       # 心脏：150，纵隔：40，肺窗：-600
+    window_width: 500        # 心脏：500，纵隔：400，肺窗：1500
+    clip_range: [-1000, 1000]
+    resample_spacing: null   # 如果需要各向同性 spacing，可设为 [1.0, 1.0, 1.0]
+
+  # 三维 patch 尺寸（根据 GPU 显存调整）
+  # 更小的 patch = 更省显存，但可能缺少上下文
+  # 更大的 patch = 更耗显存，但上下文更充分
+  crop_size: [64, 128, 128]  # (D, H, W)
+  # 示例：
+  #   - [48, 96, 96]   → ~4GB GPU
+  #   - [64, 128, 128] → ~12GB GPU
+  #   - [96, 160, 160] → ~24GB GPU
+
+  # 数据划分
+  split:
+    mode: "ratio"        # 'ratio', 'file', or 'fold'
+    train_ratio: 0.8
+    # 对于 'file' 模式：
+    # split_file: "splits/train_val_split.json"
+    # 对于 'fold' 模式：
+    # fold_idx: 0
+    # num_folds: 5
+
+  # 数据增强
+  augmentation:
+    enabled: true
+    # Probability to sample crop around foreground voxels (class > 0)
+    foreground_crop_prob: 0.6
+
+  num_workers: 4
+
+# ============ 模型配置 ============
+model:
+  architecture: "UNet3D"
+  in_channels: 1
+  num_classes: null  # Will be set from data.num_classes
+
+  # 模型大小（根据 GPU 显存和数据集大小选择）
+  base_channels: 16
+  # 选项：
+  #   - 8  → 约 1.2M 参数（最小，适合 4GB GPU 或小数据集）
+  #   - 16 → 约 5M 参数（标准，适合 12GB GPU）
+  #   - 32 → 约 20M 参数（较大，适合 24GB GPU）
+
+  depth: 4
+
+  init_weights: true
+  pretrained_path: null  # 预训练模型路径（可选）
+
+# ============ 训练配置 ============
+training:
+  epochs: 200  # 医学图像分割通常为 150-300 个 epoch
+  batch_size: 2  # 根据 GPU 显存调整
+
+  # 优化器
+  optimizer:
+    type: "Adam"
+    lr: 0.001       # 常见范围：0.0001 - 0.01
+    weight_decay: 0.00001
+    betas: [0.9, 0.999]
+
+  # 损失函数
+  loss:
+    type: "CombinedLoss"
+    ce_weight: 0.5    # CrossEntropy 权重
+    dice_weight: 0.5  # Dice loss 权重
+    # 对于类别不平衡：
+    # class_weights: [0.1, 1.0, 1.0, 1.0, ...]  # 降低背景权重
+
+  # 学习率调度器
+  scheduler:
+    type: "ReduceLROnPlateau"
+    mode: "max"       # 监控验证 Dice（越大越好）
+    factor: 0.5       # 将学习率降到 50%
+    patience: 10      # 等待 10 个 epoch 后再降低
+    min_lr: 0.000001
+
+  # 混合精度训练（更快、更省显存）
+  mixed_precision: true  # CUDA 推荐开启，CPU 可设为 false
+
+  # 梯度裁剪（防止梯度爆炸）
+  grad_clip_norm: 1.0
+
+# ============ 验证配置 ============
+validation:
+  interval: 1              # 每 N 个 epoch 验证一次
+  metric: "dice_fg_mean"   # 用于选择最佳模型的指标
+  save_predictions: true   # 保存样本预测结果
+  num_samples_to_save: 3
+
+# ============ Checkpoint 配置 ============
+checkpoint:
+  save_dir: "backend/training_ct/checkpoints"
+  save_interval: 20        # 每 N 个 epoch 保存一次 checkpoint
+  keep_last_n: 3           # 仅保留最近 N 个 checkpoint
+  save_best: true          # 始终保存最佳模型
+
+# ============ 日志配置 ============
+logging:
+  tensorboard: true
+  log_interval: 10
+
+# ============ 硬件配置 ============
+hardware:
+  device: "cuda"  # 'cuda' 或 'cpu'
+  gpu_ids: [0]    # 供未来多 GPU 支持使用
+  num_threads: 4
