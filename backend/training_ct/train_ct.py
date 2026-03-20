@@ -343,7 +343,6 @@ def train(config_path: str, args: argparse.Namespace):
     criterion = CombinedLoss(
         ce_weight=loss_config.get('ce_weight', 0.5),
         dice_weight=loss_config.get('dice_weight', 0.5),
-        num_classes=num_classes,
     )
 
     # 优化器
