@@ -113,7 +113,7 @@ class ImageCHDDataset(Dataset):
             label_map, unique_values = auto_detect_labels(
                 str(self.data_dir),
                 label_pattern=label_pattern,
-                num_samples=5,
+                num_samples=None,
             )
             logger.info(f"Auto-detected label map: {label_map}")
 
@@ -413,9 +413,13 @@ class ImageCHDDataset(Dataset):
         if self.augment:
             image_array, label_array = self._augment_3d(image_array, label_array)
 
+        # 增强/插值可能引入 float64，这里统一回训练期望的 dtype
+        image_array = np.asarray(image_array, dtype=np.float32)
+        label_array = np.asarray(label_array, dtype=np.int64)
+
         # 转换为张量
         image_tensor = torch.from_numpy(image_array).unsqueeze(0)  # (1, D, H, W)
-        label_tensor = torch.from_numpy(label_array).long()        # (D, H, W)
+        label_tensor = torch.from_numpy(label_array)               # (D, H, W)
 
         return image_tensor, label_tensor, metadata
 
@@ -566,10 +570,10 @@ class ImageCHDDataset(Dataset):
 
         # Random Gaussian noise
         if random.random() < p and noise_std > 0:
-            noise = np.random.normal(0, noise_std, image.shape)
+            noise = np.random.normal(0, noise_std, image.shape).astype(np.float32)
             image = np.clip(image + noise, 0, 1)
 
-        return image, label
+        return image.astype(np.float32, copy=False), label.astype(np.int32, copy=False)
 
     def _resize_to_crop_size(
         self, image: np.ndarray, label: np.ndarray
@@ -649,7 +653,7 @@ def get_dataloaders(
         label_map, unique_values = auto_detect_labels(
             data_dir,
             label_pattern=label_pattern,
-            num_samples=5,
+            num_samples=None,
         )
 
     # Infer num_classes if not provided

@@ -22,7 +22,7 @@ from utils.logger import logger
 def auto_detect_labels(
     data_dir: str,
     label_pattern: str = "*_label.nii.gz",
-    num_samples: int = 5,
+    num_samples: Optional[int] = None,
     exclude_background: bool = False,
 ) -> Tuple[Dict[int, int], List[int]]:
     """
@@ -33,7 +33,8 @@ def auto_detect_labels(
     参数：
         data_dir: ImageCHD 数据集根目录
         label_pattern: 标签文件的 glob 模式
-        num_samples: 扫描样本数量（默认 5）
+        num_samples: 扫描样本数量。
+                为 None 或 <=0 时扫描全部标签文件。
         exclude_background: 若为 True，假设 0 为背景并从计数中排除
 
     返回：
@@ -72,12 +73,20 @@ def auto_detect_labels(
             f"Please check your data directory and label_pattern in config."
         )
 
-    logger.info(f"Auto-detecting labels from {len(label_files)} files (scanning first {num_samples})...")
+    if num_samples is None or num_samples <= 0:
+        files_to_scan = label_files
+        logger.info(f"Auto-detecting labels from all {len(label_files)} label files...")
+    else:
+        files_to_scan = label_files[:num_samples]
+        logger.info(
+            f"Auto-detecting labels from {len(label_files)} files "
+            f"(scanning first {len(files_to_scan)})..."
+        )
 
     # Collect unique values
     unique_values_set = set()
 
-    for label_file in label_files[:num_samples]:
+    for label_file in files_to_scan:
         try:
             # 读取标签体数据
             label_sitk = sitk.ReadImage(str(label_file))

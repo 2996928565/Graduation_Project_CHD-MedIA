@@ -73,7 +73,7 @@ def train_epoch(
     device: torch.device,
     epoch: int,
     grad_clip_norm: Optional[float] = None,
-    scaler: Optional[torch.cuda.amp.GradScaler] = None,
+    scaler: Optional[torch.amp.GradScaler] = None,
 ) -> float:
     """
     训练一个 epoch。
@@ -96,12 +96,12 @@ def train_epoch(
 
     pbar = tqdm(loader, desc=f"Epoch {epoch:3d} [Train]")
     for batch_idx, (images, labels, meta) in enumerate(pbar):
-        images = images.to(device)  # (B, 1, D, H, W)
-        labels = labels.to(device)  # (B, D, H, W)
+        images = images.to(device=device, dtype=torch.float32, non_blocking=True)  # (B, 1, D, H, W)
+        labels = labels.to(device=device, dtype=torch.long, non_blocking=True)      # (B, D, H, W)
 
         # 混合精度前向传播
         if scaler is not None:
-            with torch.cuda.amp.autocast():
+            with torch.amp.autocast(device_type='cuda'):
                 outputs = model(images)
                 loss = criterion(outputs, labels)
 
@@ -159,8 +159,8 @@ def validate(
 
     pbar = tqdm(loader, desc="Validating")
     for images, labels, meta in pbar:
-        images = images.to(device)
-        labels = labels.to(device)
+        images = images.to(device=device, dtype=torch.float32, non_blocking=True)
+        labels = labels.to(device=device, dtype=torch.long, non_blocking=True)
 
         outputs = model(images)
         loss = criterion(outputs, labels)
@@ -366,7 +366,7 @@ def train(config_path: str, args: argparse.Namespace):
 
     # 混合精度训练
     use_amp = config['training'].get('mixed_precision', False) and device.type == 'cuda'
-    scaler = torch.cuda.amp.GradScaler() if use_amp else None
+    scaler = torch.amp.GradScaler('cuda') if use_amp else None
     if use_amp:
         logger.info("Using mixed precision training (AMP)")
 
