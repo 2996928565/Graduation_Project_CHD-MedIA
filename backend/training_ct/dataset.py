@@ -618,6 +618,7 @@ def get_dataloaders(
     label_map: Optional[Dict[int, int]] = None,
     num_classes: Optional[int] = None,
     batch_size: int = 2,
+    val_batch_size: int = 1,
     crop_size: Tuple[int, int, int] = (64, 128, 128),
     num_workers: int = 4,
     preprocessing_config: Optional[dict] = None,
@@ -630,6 +631,9 @@ def get_dataloaders(
     image_pattern: str = "*_image.nii.gz",
     label_pattern: str = "*_label.nii.gz",
     seed: int = 42,
+    persistent_workers: bool = True,
+    prefetch_factor: int = 2,
+    drop_last: bool = True,
 ) -> Tuple[DataLoader, DataLoader, Dict[int, int], int]:
     """
     Create training and validation DataLoaders.
@@ -708,22 +712,34 @@ def get_dataloaders(
         raise ValueError("Validation split is empty. Check split configuration and dataset size.")
 
     pin_memory = torch.cuda.is_available()
+    use_persistent_workers = persistent_workers and num_workers > 0
+
+    train_loader_kwargs = {
+        'dataset': train_dataset,
+        'batch_size': batch_size,
+        'shuffle': True,
+        'num_workers': num_workers,
+        'pin_memory': pin_memory,
+        'drop_last': drop_last,
+        'persistent_workers': use_persistent_workers,
+    }
+    val_loader_kwargs = {
+        'dataset': val_dataset,
+        'batch_size': val_batch_size,
+        'shuffle': False,
+        'num_workers': num_workers,
+        'pin_memory': pin_memory,
+        'persistent_workers': use_persistent_workers,
+    }
+
+    # prefetch_factor 仅在多进程加载时生效
+    if num_workers > 0:
+        train_loader_kwargs['prefetch_factor'] = prefetch_factor
+        val_loader_kwargs['prefetch_factor'] = prefetch_factor
 
     # Create DataLoaders
-    train_loader = DataLoader(
-        train_dataset,
-        batch_size=batch_size,
-        shuffle=True,
-        num_workers=num_workers,
-        pin_memory=pin_memory,
-    )
+    train_loader = DataLoader(**train_loader_kwargs)
 
-    val_loader = DataLoader(
-        val_dataset,
-        batch_size=1,  # Use batch_size=1 for validation (easier to handle)
-        shuffle=False,
-        num_workers=num_workers,
-        pin_memory=pin_memory,
-    )
+    val_loader = DataLoader(**val_loader_kwargs)
 
     return train_loader, val_loader, label_map, num_classes

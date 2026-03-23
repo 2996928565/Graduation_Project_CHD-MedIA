@@ -106,7 +106,7 @@ def train_epoch(
                 loss = criterion(outputs, labels)
 
             # 带梯度缩放的反向传播
-            optimizer.zero_grad()
+            optimizer.zero_grad(set_to_none=True)
             scaler.scale(loss).backward()
 
             # 梯度裁剪
@@ -123,7 +123,7 @@ def train_epoch(
             loss = criterion(outputs, labels)
 
             # 反向传播
-            optimizer.zero_grad()
+            optimizer.zero_grad(set_to_none=True)
             loss.backward()
 
             # 梯度裁剪
@@ -282,6 +282,18 @@ def train(config_path: str, args: argparse.Namespace):
         logger.info(f"GPU: {torch.cuda.get_device_name(0)}")
         logger.info(f"GPU Memory: {torch.cuda.get_device_properties(0).total_memory / 1e9:.2f} GB")
 
+        # 4090D 等 Ada GPU 上常见的吞吐优化选项
+        cuda_cfg = config.get('hardware', {}).get('cuda_optimizations', {})
+        if cuda_cfg.get('cudnn_benchmark', True):
+            torch.backends.cudnn.benchmark = True
+            logger.info("Enabled cuDNN benchmark")
+        if cuda_cfg.get('allow_tf32', True):
+            torch.backends.cuda.matmul.allow_tf32 = True
+            torch.backends.cudnn.allow_tf32 = True
+            if hasattr(torch, 'set_float32_matmul_precision'):
+                torch.set_float32_matmul_precision('high')
+            logger.info("Enabled TF32 matmul/cuDNN")
+
     # 设置随机种子
     seed = config['experiment'].get('seed', 42)
     torch.manual_seed(seed)
@@ -300,6 +312,7 @@ def train(config_path: str, args: argparse.Namespace):
         label_map=data_config.get('label_map'),
         num_classes=data_config.get('num_classes'),
         batch_size=config['training']['batch_size'],
+        val_batch_size=config['training'].get('val_batch_size', 1),
         crop_size=tuple(data_config['crop_size']),
         num_workers=data_config.get('num_workers', 4),
         preprocessing_config=data_config.get('ct_preprocessing'),
@@ -312,6 +325,9 @@ def train(config_path: str, args: argparse.Namespace):
         image_pattern=data_config.get('file_pattern', '*_image.nii.gz'),
         label_pattern=data_config.get('label_pattern', '*_label.nii.gz'),
         seed=seed,
+        persistent_workers=data_config.get('dataloader', {}).get('persistent_workers', True),
+        prefetch_factor=data_config.get('dataloader', {}).get('prefetch_factor', 2),
+        drop_last=data_config.get('dataloader', {}).get('drop_last', True),
     )
 
     # 打印标签信息
@@ -332,6 +348,17 @@ def train(config_path: str, args: argparse.Namespace):
         num_classes=num_classes,
         base_channels=config['model']['base_channels'],
     )
+
+    compile_cfg = config['training'].get('compile', {})
+    use_compile = compile_cfg.get('enabled', False)
+    if use_compile:
+        if hasattr(torch, 'compile'):
+            compile_mode = compile_cfg.get('mode', 'max-autotune')
+            model = torch.compile(model, mode=compile_mode)
+            logger.info(f"Enabled torch.compile(mode={compile_mode})")
+        else:
+            logger.warning("torch.compile is not available in this PyTorch version; skip compile")
+
     model = model.to(device)
 
     # 统计参数量

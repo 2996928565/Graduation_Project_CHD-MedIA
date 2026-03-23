@@ -67,7 +67,11 @@ data:
     foreground_crop_prob: 0.6    # 裁剪时围绕前景体素采样的概率
 
   # DataLoader 设置
-  num_workers: 4  # 并行数据加载线程数
+  num_workers: 8  # 24GB GPU 建议起步值
+  dataloader:
+    persistent_workers: true
+    prefetch_factor: 4
+    drop_last: true
 
 # ============ 模型配置 ============
 model:
@@ -86,7 +90,8 @@ model:
 # ============ 训练配置 ============
 training:
   epochs: 200
-  batch_size: 2  # Adjust based on GPU memory and crop_size
+  batch_size: 12  # 24GB GPU 建议起步值，可继续上调到 10/12
+  val_batch_size: 4
 
   # 优化器配置
   optimizer:
@@ -112,6 +117,11 @@ training:
 
   # 混合精度训练（需要 CUDA）
   mixed_precision: true    # 使用 AMP 加速训练
+
+  # 编译优化（PyTorch 2.x）
+  compile:
+    enabled: false         # 先关闭，确认稳定后可设为 true
+    mode: "max-autotune"  # 可选：default / reduce-overhead / max-autotune
 
   # 梯度裁剪
   grad_clip_norm: 1.0      # 最大梯度范数（设为 null 关闭）
@@ -140,3 +150,6 @@ hardware:
   device: "cuda"           # 'cuda' 或 'cpu'
   gpu_ids: [0]             # 多 GPU 支持（尚未实现）
   num_threads: 4           # CPU 数据加载线程数
+  cuda_optimizations:
+    cudnn_benchmark: true
+    allow_tf32: true
