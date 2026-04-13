@@ -35,6 +35,7 @@
         <el-table-column label="操作" width="330">
           <template #default="{ row }">
             <el-button
+              v-if="false"
               size="small"
               icon="VideoCamera"
               @click="goDetect(row, 'ultrasound')"
@@ -44,7 +45,7 @@
               type="warning"
               icon="PictureFilled"
               @click="goDetect(row, 'mri')"
-            >MRI 检测</el-button>
+            >影像检测</el-button>
             <el-button
               size="small"
               type="primary"
@@ -88,7 +89,7 @@ async function fetchPatients() {
 }
 
 function modalityLabel(m) {
-  return { ultrasound: '超声', mri: 'MRI', both: '超声+MRI' }[m] || m
+  return { ultrasound: '超声', mri: '影像', both: '超声+影像' }[m] || m
 }
 
 function formatDate(iso) {

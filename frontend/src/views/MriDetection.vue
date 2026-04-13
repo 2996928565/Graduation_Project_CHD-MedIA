@@ -1,7 +1,7 @@
 <template>
   <div>
     <div class="page-header">
-      <h2><el-icon><PictureFilled /></el-icon> 心脏 MRI 检测</h2>
+      <h2><el-icon><PictureFilled /></el-icon> 心脏影像检测</h2>
       <el-tag type="warning">心脏磁共振成像（CMR）</el-tag>
     </div>
 
@@ -45,10 +45,7 @@
             accept=".png,.jpg,.jpeg,.dcm,.dicom,.nii,.nii.gz"
             @file-selected="onFileSelected"
           />
-          <div v-if="isNiftiFile" style="margin-top:12px">
-            <el-alert title="NIfTI 文件已加载，暂不支持预览，检测功能开发中" type="info" :closable="false" show-icon />
-          </div>
-          <div v-else-if="previewSrc" style="margin-top:12px">
+          <div v-if="previewSrc" style="margin-top:12px">
             <p style="color:#5a7fa0;font-size:13px;margin:0 0 8px">原始影像预览：</p>
             <img :src="previewSrc" style="max-width:100%;border-radius:8px;border:1px solid #e0eaf5" />
           </div>
@@ -70,20 +67,20 @@
           <template #header>
             <span class="card-title">检测结果</span>
             <el-button
-              v-if="selectedFile && !isNiftiFile"
+              v-if="selectedFile"
               type="warning"
               size="small"
               :loading="detecting"
               style="float:right"
               @click="runDetection"
             >
-              <el-icon><Search /></el-icon> 开始 MRI 分析
+              <el-icon><Search /></el-icon> 开始影像分析
             </el-button>
           </template>
 
           <div v-if="detecting" class="detecting-tip">
             <el-icon class="is-loading"><Loading /></el-icon>
-            正在分析 MRI 影像，U-Net 分割中，请稍候...
+            正在分析影像，U-Net 分割中，请稍候...
           </div>
 
           <DetectionResult
@@ -92,7 +89,7 @@
             modality="mri"
           />
 
-          <el-empty v-else description="请上传心脏 MRI 影像并点击「开始 MRI 分析」" />
+          <el-empty v-else description="请上传心脏影像（支持 NIfTI/DICOM/PNG/JPG）" />
         </el-card>
       </el-col>
     </el-row>
@@ -126,6 +123,7 @@ const previewSrc = ref('')
 const dicomMeta = ref(null)
 const detecting = ref(false)
 const detectionResult = ref(null)
+const detectRequestId = ref(0)
 
 const isNiftiFile = computed(() => {
   const name = (selectedFile.value?.name || '').toLowerCase()
@@ -140,28 +138,49 @@ const filteredMeta = computed(() => {
 
 function onFileSelected({ file, previewBase64, metadata }) {
   selectedFile.value = file
-  const nifti = file && ((file.name.toLowerCase().endsWith('.nii.gz') || file.name.toLowerCase().endsWith('.nii')))
-  previewSrc.value = nifti || !file
+  previewSrc.value = !file
     ? ''
     : previewBase64
       ? `data:image/png;base64,${previewBase64}`
       : URL.createObjectURL(file)
   dicomMeta.value = metadata || null
   detectionResult.value = null
+
+  if (file) {
+    runDetection({ silent: true })
+  }
 }
 
-async function runDetection() {
+async function runDetection({ silent = false } = {}) {
   if (!selectedFile.value) {
-    ElMessage.warning('请先上传 MRI 影像')
+    if (!silent) ElMessage.warning('请先上传影像')
     return
   }
+
+  const requestId = ++detectRequestId.value
   detecting.value = true
   try {
-    const result = await detectImage(selectedFile.value, 'mri', threshold.value)
+    const result = await detectImage(
+      selectedFile.value,
+      'mri',
+      threshold.value,
+      route.query.patientId || null,
+    )
+    if (requestId !== detectRequestId.value) {
+      return
+    }
     detectionResult.value = result
-    ElMessage.success(`MRI 分析完成，发现 ${result.detections.length} 条结果`)
+    if (!silent) {
+      ElMessage.success(`影像分析完成，发现 ${result.detections.length} 条结果`)
+    }
+  } catch {
+    if (!silent) {
+      ElMessage.error('影像分析失败，请重试')
+    }
   } finally {
-    detecting.value = false
+    if (requestId === detectRequestId.value) {
+      detecting.value = false
+    }
   }
 }
 
@@ -170,6 +189,7 @@ function goToReport() {
     path: '/report',
     query: {
       modality: 'mri',
+      patientId: route.query.patientId || '',
       name: patientName.value,
       age: patientAge.value,
       sex: patientSex.value,

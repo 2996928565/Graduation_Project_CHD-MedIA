@@ -304,8 +304,30 @@ def main():
     logger.info(f"Loading checkpoint from {args.checkpoint}")
     checkpoint = torch.load(args.checkpoint, map_location=device, weights_only=False)
 
-    num_classes = config['model']['num_classes']
-    base_channels = config['model']['base_channels']
+    ckpt_config = checkpoint.get('config', {}) if isinstance(checkpoint, dict) else {}
+
+    num_classes = config.get('model', {}).get('num_classes')
+    if num_classes is None:
+        num_classes = ckpt_config.get('model', {}).get('num_classes')
+    if num_classes is None:
+        num_classes = ckpt_config.get('data', {}).get('num_classes')
+    if num_classes is None:
+        out_weight = checkpoint.get('model_state_dict', {}).get('out.weight')
+        if out_weight is not None:
+            num_classes = int(out_weight.shape[0])
+    if num_classes is None:
+        raise ValueError(
+            "Cannot determine num_classes from config/checkpoint. "
+            "Please set model.num_classes in config."
+        )
+
+    base_channels = config.get('model', {}).get('base_channels')
+    if base_channels is None:
+        base_channels = ckpt_config.get('model', {}).get('base_channels', 16)
+
+    # 回填推理配置，供下游日志与可视化使用
+    config.setdefault('model', {})['num_classes'] = int(num_classes)
+    config.setdefault('model', {})['base_channels'] = int(base_channels)
 
     model = get_model(num_classes=num_classes, base_channels=base_channels)
     model.load_state_dict(checkpoint['model_state_dict'])

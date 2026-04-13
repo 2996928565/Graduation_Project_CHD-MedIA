@@ -47,8 +47,8 @@ ai:
   dashscope_max_retries: 3
 
 models:
-  ultrasound_path: "models/ultrasound_yolo.pt"
-  mri_path: "models/best_model.pth"
+  ultrasound_path: "backend/models/ultrasound_yolo.pt"
+  mri_path: "backend/models/best_model_mri.pth"
 
 logging:
   dir: "logs"

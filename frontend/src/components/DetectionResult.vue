@@ -20,6 +20,14 @@
       </el-col>
     </el-row>
 
+    <el-alert
+      v-if="result.inference_mode"
+      :title="`推理模式：${result.inference_mode}`"
+      type="info"
+      :closable="false"
+      style="margin-bottom:12px"
+    />
+
     <el-row :gutter="12">
       <!-- 标注影像 -->
       <el-col :span="12">
@@ -30,6 +38,38 @@
             alt="标注影像"
             class="annotated-image"
           />
+        </div>
+
+        <div
+          v-if="result.segmentation_mask_base64"
+          class="annotated-image-wrap"
+          style="margin-top:10px"
+        >
+          <p class="section-title">分割 Mask</p>
+          <img
+            :src="`data:image/png;base64,${result.segmentation_mask_base64}`"
+            alt="分割掩码"
+            class="annotated-image"
+          />
+          <div style="margin-top:8px;text-align:right">
+            <el-link type="primary" @click="downloadSegmentationMask">
+              下载分割 Mask
+            </el-link>
+          </div>
+
+          <div v-if="showSegmentationLegend" class="seg-legend">
+            <p class="section-title" style="margin-top:10px">分割图例</p>
+            <div class="seg-legend-grid">
+              <div
+                v-for="item in segmentationLegend"
+                :key="item.label"
+                class="seg-legend-item"
+              >
+                <span class="seg-color" :style="{ backgroundColor: item.color }" />
+                <span class="seg-label">{{ item.label }}</span>
+              </div>
+            </div>
+          </div>
         </div>
       </el-col>
 
@@ -102,6 +142,29 @@ const props = defineProps({
 const abnormalCount = computed(
   () => props.result.detections.filter((d) => d.label !== '正常').length,
 )
+
+const showSegmentationLegend = computed(
+  () => props.modality === 'mri' && Boolean(props.result.segmentation_mask_base64),
+)
+
+const segmentationLegend = [
+  { label: '背景', color: '#000000' },
+  { label: '左心室(LV)', color: '#dc2828' },
+  { label: '右心室(RV)', color: '#285adc' },
+  { label: '左心房(LA)', color: '#5adc28' },
+  { label: '右心房(RA)', color: '#dcdc28' },
+  { label: '心肌', color: '#b478dc' },
+  { label: '升主动脉', color: '#dc50b4' },
+  { label: '肺动脉', color: '#50b4ff' },
+]
+
+function downloadSegmentationMask() {
+  if (!props.result.segmentation_mask_base64) return
+  const a = document.createElement('a')
+  a.href = `data:image/png;base64,${props.result.segmentation_mask_base64}`
+  a.download = 'segmentation_mask.png'
+  a.click()
+}
 </script>
 
 <style scoped>
@@ -153,5 +216,31 @@ const abnormalCount = computed(
   display: flex;
   align-items: center;
   gap: 4px;
+}
+.seg-legend {
+  border-top: 1px dashed #d6e4f5;
+  margin-top: 10px;
+  padding-top: 6px;
+}
+.seg-legend-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px 10px;
+}
+.seg-legend-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.seg-color {
+  width: 12px;
+  height: 12px;
+  border-radius: 3px;
+  border: 1px solid #c8d8ea;
+  flex: 0 0 12px;
+}
+.seg-label {
+  font-size: 12px;
+  color: #35526f;
 }
 </style>

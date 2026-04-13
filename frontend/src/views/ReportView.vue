@@ -118,6 +118,7 @@ const form = reactive({
   patientAge: Number(route.query.age) || null,
   patientSex: route.query.sex || '未知',
   modality: route.query.modality || 'ultrasound',
+  patientId: route.query.patientId || '',
 })
 
 const detections = ref([])
@@ -142,6 +143,7 @@ async function handleGenerate() {
     const payload = {
       modality: form.modality,
       patient_info: {
+        patient_id: form.patientId || null,
         name: form.patientName || '患者',
         age: form.patientAge,
         sex: form.patientSex,
@@ -162,6 +164,7 @@ async function exportDocx() {
     const payload = {
       modality: form.modality,
       patient_info: {
+        patient_id: form.patientId || null,
         name: form.patientName || '患者',
         age: form.patientAge,
         sex: form.patientSex,

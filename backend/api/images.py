@@ -3,19 +3,27 @@
 支持超声/MRI 影像（PNG/JPG/DICOM）的上传、预处理和异常检测。
 """
 import base64
+import gc
 import uuid
 from pathlib import Path
 from typing import Any, Dict, Optional
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
-from fastapi.responses import Response
+from fastapi.responses import FileResponse
 from pydantic import BaseModel
+from sqlalchemy.orm import Session
 
 from api.auth import verify_token
 from config.settings import settings
 from core.ultrasound import get_ultrasound_detector
 from core.mri import get_mri_detector
-from utils.dicom_parser import load_dicom, extract_metadata, dicom_to_png_bytes, get_modality
+from db.database import get_db
+from db.models import DetectionRecord
+from utils.dicom_parser import load_dicom, extract_metadata, dicom_to_png_bytes
+from utils.nifti_parser import (
+    nifti_bytes_to_png_and_metadata,
+    nifti_file_to_array_and_metadata,
+)
 from loguru import logger
 
 router = APIRouter(prefix="/images", tags=["影像检测"])
@@ -58,8 +66,16 @@ def _is_dicom(filename: str, file_bytes: bytes) -> bool:
 def _save_upload(file_bytes: bytes, original_filename: str) -> str:
     """保存上传文件到 uploads 目录，返回存储路径"""
     uid = str(uuid.uuid4())[:8]
-    suffix = Path(original_filename).suffix or ".bin"
+    name = (original_filename or "").lower()
+    suffix = ".nii.gz" if name.endswith(".nii.gz") else (Path(original_filename).suffix or ".bin")
     save_path = Path(settings.upload_dir) / f"{uid}{suffix}"
+    save_path.write_bytes(file_bytes)
+    return str(save_path)
+
+
+def _save_prediction(file_bytes: bytes, filename: str) -> str:
+    """保存推理输出文件到 prediction 目录，返回存储路径"""
+    save_path = Path(settings.prediction_dir) / filename
     save_path.write_bytes(file_bytes)
     return str(save_path)
 
@@ -76,6 +92,9 @@ class DetectionResponse(BaseModel):
     dicom_metadata: Optional[Dict[str, Any]] = None
     detections: list
     annotated_image_base64: str
+    segmentation_mask_base64: Optional[str] = None
+    segmentation_download_url: Optional[str] = None
+    inference_mode: Optional[str] = None
     processing_time_s: float
     image_size: Dict[str, int]
 
@@ -95,7 +114,7 @@ class DicomPreviewResponse(BaseModel):
     summary="上传并预览影像（含 DICOM 解析）",
 )
 async def upload_preview(
-    file: UploadFile = File(..., description="影像文件（PNG/JPG/DICOM）"),
+    file: UploadFile = File(..., description="影像文件（PNG/JPG/DICOM/NIfTI）"),
     _token: str = Depends(verify_token),
 ) -> DicomPreviewResponse:
     """
@@ -116,10 +135,18 @@ async def upload_preview(
     metadata = {}
 
     if _is_nifti(filename):
-        # NIfTI 文件暂不解析，存档后直接返回空预览
+        try:
+            preview_bytes, metadata = nifti_bytes_to_png_and_metadata(file_bytes, filename)
+        except Exception as e:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=f"NIfTI 文件解析失败: {e}",
+            )
+
         _save_upload(file_bytes, filename)
-        logger.info(f"NIfTI 文件已接收 | 文件: {filename}")
-        return DicomPreviewResponse(filename=filename, metadata={}, preview_image_base64="")
+        preview_b64 = base64.b64encode(preview_bytes).decode("utf-8")
+        logger.info(f"NIfTI 预览解析成功 | 文件: {filename}")
+        return DicomPreviewResponse(filename=filename, metadata=metadata, preview_image_base64=preview_b64)
 
     if is_dcm:
         try:
@@ -151,7 +178,7 @@ async def upload_preview(
     summary="执行影像异常检测",
 )
 async def detect_image(
-    file: UploadFile = File(..., description="影像文件（PNG/JPG/DICOM）"),
+    file: UploadFile = File(..., description="影像文件（PNG/JPG/DICOM/NIfTI）"),
     modality: str = Form(
         ...,
         description="影像模态：'ultrasound'（超声）或 'mri'（MRI）",
@@ -162,6 +189,8 @@ async def detect_image(
         ge=0.0,
         le=1.0,
     ),
+    patient_id: Optional[str] = Form(default=None, description="患者 ID（可选）"),
+    db: Session = Depends(get_db),
     _token: str = Depends(verify_token),
 ) -> DetectionResponse:
     """
@@ -188,13 +217,35 @@ async def detect_image(
         )
 
     filename = file.filename or "unknown"
+    file_size_kb = round(len(file_bytes) / 1024, 1)
     task_id = str(uuid.uuid4())
+    is_nifti = _is_nifti(filename)
     is_dcm = _is_dicom(filename, file_bytes)
     dicom_meta = None
     image_bytes = file_bytes
+    nifti_volume = None
+    upload_path = _save_upload(file_bytes, filename)
+
+    if is_nifti:
+        if modality != "mri":
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="NIfTI 文件仅支持 MRI 模态检测",
+            )
+        try:
+            nifti_volume, nifti_meta = nifti_file_to_array_and_metadata(upload_path)
+            dicom_meta = nifti_meta
+            image_bytes = b""
+            file_bytes = b""
+            logger.info(f"NIfTI 3D 体数据解析成功 | 文件: {filename}")
+        except Exception as e:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=f"NIfTI 文件解析失败: {e}",
+            )
 
     # DICOM 处理：提取元数据并转换为 PNG
-    if is_dcm:
+    if is_dcm and not is_nifti:
         try:
             ds = load_dicom(file_bytes)
             dicom_meta = extract_metadata(ds)
@@ -213,7 +264,10 @@ async def detect_image(
             result = detector.detect(image_bytes, confidence_threshold)
         else:
             detector = get_mri_detector()
-            result = detector.detect(image_bytes, confidence_threshold)
+            if nifti_volume is not None:
+                result = detector.detect_nifti_volume(nifti_volume, confidence_threshold)
+            else:
+                result = detector.detect(image_bytes, confidence_threshold)
     except Exception as e:
         logger.error(f"影像检测失败 | 任务ID: {task_id} | 错误: {e}")
         raise HTTPException(
@@ -221,25 +275,91 @@ async def detect_image(
             detail=f"影像检测失败: {e}",
         )
 
-    # 保存上传文件
-    _save_upload(file_bytes, filename)
-
     annotated_b64 = base64.b64encode(result["annotated_image_bytes"]).decode("utf-8")
+    annotated_path = _save_prediction(result["annotated_image_bytes"], f"{task_id}_annotated.png")
+
+    segmentation_b64 = None
+    segmentation_download_url = None
+    segmentation_path = None
+    if result.get("segmentation_mask_bytes"):
+        segmentation_bytes = result["segmentation_mask_bytes"]
+        segmentation_b64 = base64.b64encode(segmentation_bytes).decode("utf-8")
+        segmentation_path = _save_prediction(segmentation_bytes, f"{task_id}_segmentation_mask.png")
+        segmentation_download_url = f"/api/v1/images/segmentation-mask/{task_id}"
+
+    record = DetectionRecord(
+        task_id=task_id,
+        patient_id=patient_id,
+        modality=modality,
+        filename=filename,
+        file_size_kb=file_size_kb,
+        is_dicom=is_dcm,
+        dicom_metadata=dicom_meta or {},
+        detections=result["detections"],
+        processing_time_s=float(result["processing_time_s"]),
+        image_width=result["image_size"].get("width"),
+        image_height=result["image_size"].get("height"),
+        upload_path=upload_path,
+        annotated_image_path=annotated_path,
+        segmentation_mask_path=segmentation_path,
+    )
+    db.add(record)
+    db.commit()
 
     logger.info(
         f"检测完成 | 任务ID: {task_id} | 模态: {modality} | "
         f"检测数: {len(result['detections'])} | 耗时: {result['processing_time_s']}s"
     )
 
+    # 显式释放大对象，降低连续请求时的内存峰值。
+    del nifti_volume
+    del image_bytes
+    if is_nifti:
+        gc.collect()
+
     return DetectionResponse(
         task_id=task_id,
         modality=modality,
         filename=filename,
-        file_size_kb=round(len(file_bytes) / 1024, 1),
+        file_size_kb=file_size_kb,
         is_dicom=is_dcm,
         dicom_metadata=dicom_meta,
         detections=result["detections"],
         annotated_image_base64=annotated_b64,
+        segmentation_mask_base64=segmentation_b64,
+        segmentation_download_url=segmentation_download_url,
+        inference_mode=result.get("inference_mode"),
         processing_time_s=result["processing_time_s"],
         image_size=result["image_size"],
+    )
+
+
+@router.get(
+    "/segmentation-mask/{task_id}",
+    summary="下载 MRI 分割 mask",
+)
+async def download_segmentation_mask(
+    task_id: str,
+    db: Session = Depends(get_db),
+    _token: str = Depends(verify_token),
+):
+    """根据 task_id 下载检测任务对应的分割 mask 文件。"""
+    record = db.query(DetectionRecord).filter(DetectionRecord.task_id == task_id).first()
+    if not record or not record.segmentation_mask_path:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"未找到任务 {task_id} 的分割mask",
+        )
+
+    mask_path = Path(record.segmentation_mask_path)
+    if not mask_path.exists():
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="分割mask文件不存在",
+        )
+
+    return FileResponse(
+        path=str(mask_path),
+        media_type="image/png",
+        filename=f"{task_id}_segmentation_mask.png",
     )

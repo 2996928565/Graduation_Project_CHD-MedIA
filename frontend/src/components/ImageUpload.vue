@@ -23,7 +23,7 @@
       <template #tip>
         <div class="upload-tip">
           支持格式：{{ accept }}<br />
-          <span v-if="modality === 'mri'">MRI 序列：DICOM (.dcm) / PNG / JPG</span>
+          <span v-if="modality === 'mri'">MRI 序列：NIfTI (.nii/.nii.gz) / DICOM (.dcm) / PNG / JPG</span>
           <span v-else>超声影像：DICOM (.dcm) / PNG / JPG</span>
           <br />最大 {{ maxSizeMB }} MB
         </div>

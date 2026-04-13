@@ -17,12 +17,16 @@ export function uploadPreview(file) {
  * @param {File} file - 影像文件
  * @param {string} modality - 'ultrasound' | 'mri'
  * @param {number} confidenceThreshold - 置信度阈值
+ * @param {string|null} patientId - 患者 ID（可选）
  */
-export function detectImage(file, modality, confidenceThreshold = 0.5) {
+export function detectImage(file, modality, confidenceThreshold = 0.5, patientId = null) {
   const formData = new FormData()
   formData.append('file', file)
   formData.append('modality', modality)
   formData.append('confidence_threshold', String(confidenceThreshold))
+  if (patientId) {
+    formData.append('patient_id', patientId)
+  }
   return request.post('/images/detect', formData, {
     headers: { 'Content-Type': 'multipart/form-data' },
     timeout: 300000, // 5 分钟（大影像检测）

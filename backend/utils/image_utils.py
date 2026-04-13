@@ -4,6 +4,7 @@
 """
 import io
 from typing import Optional, Tuple
+import re
 
 import cv2
 import numpy as np
@@ -181,6 +182,22 @@ def draw_detections(
         标注后的 BGR 数组
     """
     annotated = image.copy()
+
+    def _safe_label_text(label: str) -> str:
+        """OpenCV 不支持中文字体时，优先提取括号内英文缩写，避免乱码。"""
+        if not label:
+            return "abnormal"
+        if label.isascii():
+            return label
+
+        # 如“左心室(LV)”则直接显示“LV”
+        abbr = re.findall(r"\(([A-Za-z0-9_\-]+)\)", label)
+        if abbr:
+            return abbr[-1]
+
+        ascii_only = "".join(ch for ch in label if ord(ch) < 128).strip()
+        return ascii_only if ascii_only else "abnormal"
+
     for det in detections:
         bbox = det.get("bbox", [])
         if len(bbox) != 4:
@@ -193,11 +210,13 @@ def draw_detections(
         cv2.rectangle(annotated, (x1, y1), (x2, y2), color, 2)
 
         # 绘制标签背景
-        text = f"{label} {conf:.2f}"
+        safe_label = _safe_label_text(label)
+        text = f"{safe_label} {conf:.2f}"
         (tw, th), _ = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)
-        cv2.rectangle(annotated, (x1, y1 - th - 6), (x1 + tw + 4, y1), color, -1)
+        top_y = max(y1 - th - 6, 0)
+        cv2.rectangle(annotated, (x1, top_y), (x1 + tw + 4, y1), color, -1)
         cv2.putText(
-            annotated, text, (x1 + 2, y1 - 4),
+            annotated, text, (x1 + 2, max(y1 - 4, 12)),
             cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1,
         )
     return annotated

@@ -27,6 +27,17 @@ _upload = _cfg.get("upload", {})
 _ai = _cfg.get("ai", {})
 _models_cfg = _cfg.get("models", {})
 _logging = _cfg.get("logging", {})
+_prediction = _cfg.get("prediction", {})
+
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
+
+
+def _resolve_config_path(path_str: str) -> str:
+    """将配置中的相对路径解析为项目内绝对路径。"""
+    p = Path(path_str)
+    if p.is_absolute():
+        return str(p)
+    return str((_PROJECT_ROOT / p).resolve())
 
 
 class Settings:
@@ -64,6 +75,7 @@ class Settings:
     # ── 文件上传 ─────────────────────────────────────────────────
     upload_dir: str = _upload.get("dir", "uploads")
     max_upload_size_mb: int = _upload.get("max_size_mb", 200)
+    prediction_dir: str = _prediction.get("dir", "predictions")
 
     # ── 阿里百炼 ─────────────────────────────────────────────────
     dashscope_api_key: str = _ai.get("dashscope_api_key", "")
@@ -72,8 +84,12 @@ class Settings:
     dashscope_max_retries: int = _ai.get("dashscope_max_retries", 3)
 
     # ── 模型路径 ─────────────────────────────────────────────────
-    ultrasound_model_path: str = _models_cfg.get("ultrasound_path", "models/ultrasound_yolo.pt")
-    mri_model_path: str = _models_cfg.get("mri_path", "models/best_model.pth")
+    ultrasound_model_path: str = _resolve_config_path(
+        _models_cfg.get("ultrasound_path", "backend/models/ultrasound_yolo.pt")
+    )
+    mri_model_path: str = _resolve_config_path(
+        _models_cfg.get("mri_path", "backend/models/best_model_mri.pth")
+    )
 
     # ── 日志 ─────────────────────────────────────────────────────
     log_dir: str = _logging.get("dir", "logs")
@@ -84,4 +100,5 @@ settings = Settings()
 
 # 确保必要目录存在
 os.makedirs(settings.upload_dir, exist_ok=True)
+os.makedirs(settings.prediction_dir, exist_ok=True)
 os.makedirs(settings.log_dir, exist_ok=True)

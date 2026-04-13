@@ -28,9 +28,23 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from training_ct.model import get_model
 from training_ct.utils.ct_preprocessing import ct_preprocess_pipeline
-from training_ct.utils.label_utils import remap_labels
+from training_ct.utils.label_utils import remap_labels, auto_detect_labels
 from training_ct.utils.visualization import save_prediction_comparison, plot_dice_scores
 from utils.logger import logger
+
+
+def resolve_device(device: str) -> torch.device:
+    """Resolve runtime device; fail fast if CUDA is requested but unavailable."""
+    requested = (device or "cpu").lower()
+    if requested == 'cuda':
+        if not torch.cuda.is_available():
+            raise RuntimeError(
+                "CUDA was requested but is unavailable. "
+                "Please verify GPU driver and install a CUDA-enabled PyTorch build."
+            )
+        return torch.device('cuda')
+
+    return torch.device('cpu')
 
 
 def _nifti_stem(path: Path) -> str:
@@ -179,6 +193,70 @@ def compute_dice_scores(pred: np.ndarray, target: np.ndarray, num_classes: int) 
     return dice_scores
 
 
+def log_volume_distribution(
+    volume: np.ndarray,
+    name: str,
+    class_names: list,
+    max_items: int = 20,
+):
+    """打印体数据的类别分布，用于快速诊断是否出现全背景预测。"""
+    unique_vals, counts = np.unique(volume, return_counts=True)
+    total = int(volume.size)
+
+    pairs = list(zip(unique_vals.tolist(), counts.tolist()))
+    logger.info(f"{name} unique labels: {[v for v, _ in pairs]}")
+
+    if len(pairs) > max_items:
+        logger.warning(
+            f"{name} has {len(pairs)} unique labels; showing first {max_items} only"
+        )
+        pairs = pairs[:max_items]
+
+    for cls_idx, count in pairs:
+        ratio = 100.0 * count / max(total, 1)
+        cls_name = class_names[cls_idx] if 0 <= cls_idx < len(class_names) else f"Class {cls_idx}"
+        logger.info(f"  {name} - {cls_name:20s}: {count:10d} voxels ({ratio:6.2f}%)")
+
+
+def scan_dataset_label_coverage(
+    image_files,
+    num_classes: int,
+    class_names: list,
+):
+    """扫描测试集标签覆盖情况，打印每个类别是否在标签中出现。"""
+    total_counts = np.zeros(num_classes, dtype=np.int64)
+    scanned = 0
+
+    for image_file in image_files:
+        label_file = _find_label_file(image_file)
+        if label_file is None or not label_file.exists():
+            continue
+
+        label_arr = sitk.GetArrayFromImage(sitk.ReadImage(str(label_file))).astype(np.int32)
+        unique_vals, counts = np.unique(label_arr, return_counts=True)
+
+        for v, c in zip(unique_vals.tolist(), counts.tolist()):
+            if 0 <= v < num_classes:
+                total_counts[v] += int(c)
+
+        scanned += 1
+
+    if scanned == 0:
+        logger.warning("No paired labels found while scanning dataset coverage.")
+        return
+
+    total_voxels = int(total_counts.sum())
+    present_classes = [idx for idx, c in enumerate(total_counts.tolist()) if c > 0]
+    logger.info(f"Label coverage scan: {scanned} labeled cases, present classes={present_classes}")
+
+    for cls_idx, cls_count in enumerate(total_counts.tolist()):
+        cls_name = class_names[cls_idx] if cls_idx < len(class_names) else f"Class {cls_idx}"
+        ratio = 100.0 * cls_count / max(total_voxels, 1)
+        logger.info(
+            f"  LabelCoverage - {cls_name:20s}: {cls_count:10d} voxels ({ratio:6.2f}%)"
+        )
+
+
 def test(
     checkpoint_path: str,
     config: dict,
@@ -200,15 +278,36 @@ def test(
     output_path.mkdir(parents=True, exist_ok=True)
 
     # 设置设备
-    device = torch.device(device if torch.cuda.is_available() else 'cpu')
+    device = resolve_device(device)
     logger.info(f"Using device: {device}")
 
     # 读取模型
     logger.info(f"Loading checkpoint from {checkpoint_path}")
     checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
 
-    num_classes = config['model']['num_classes']
-    base_channels = config['model']['base_channels']
+    ckpt_config = checkpoint.get('config', {}) if isinstance(checkpoint, dict) else {}
+
+    num_classes = config.get('model', {}).get('num_classes')
+    if num_classes is None:
+        num_classes = ckpt_config.get('model', {}).get('num_classes')
+    if num_classes is None:
+        num_classes = ckpt_config.get('data', {}).get('num_classes')
+    if num_classes is None:
+        out_weight = checkpoint.get('model_state_dict', {}).get('out.weight')
+        if out_weight is not None:
+            num_classes = int(out_weight.shape[0])
+    if num_classes is None:
+        raise ValueError(
+            "Cannot determine num_classes from config/checkpoint. "
+            "Please set model.num_classes in config."
+        )
+
+    base_channels = config.get('model', {}).get('base_channels')
+    if base_channels is None:
+        base_channels = ckpt_config.get('model', {}).get('base_channels', 16)
+
+    config.setdefault('model', {})['num_classes'] = int(num_classes)
+    config.setdefault('model', {})['base_channels'] = int(base_channels)
 
     model = get_model(num_classes=num_classes, base_channels=base_channels)
     model.load_state_dict(checkpoint['model_state_dict'])
@@ -230,12 +329,27 @@ def test(
 
     # 获取预处理配置
     preprocessing_config = config['data'].get('ct_preprocessing', {})
-    label_map = config['data']['label_map']
+    label_map = config.get('data', {}).get('label_map')
+    if label_map is None:
+        _, detected_values = auto_detect_labels(
+            data_dir,
+            label_pattern=label_pattern,
+            num_samples=None,
+        )
+        label_map = {int(v): idx for idx, v in enumerate(detected_values)}
+        logger.info(f"Auto-detected label map for test: {label_map}")
+
+    # YAML 读入时 key 可能为字符串，统一转为 int
+    label_map = {int(k): int(v) for k, v in label_map.items()}
     crop_size = tuple(config['data']['crop_size'])
     class_names = config['data'].get('class_names', [f"Class {i}" for i in range(num_classes)])
 
+    # 先扫描整个测试集标签覆盖，确认有哪些类别真实出现
+    scan_dataset_label_coverage(image_files, num_classes, class_names)
+
     # 逐个测试体数据
     all_dice_scores = {cls_idx: [] for cls_idx in range(num_classes)}
+    valid_dice_scores = {cls_idx: [] for cls_idx in range(num_classes)}
 
     for image_file in tqdm(image_files, desc="Testing"):
         # 查找对应的标签文件
@@ -268,11 +382,20 @@ def test(
             num_classes=num_classes,
         )
 
+        # 调试输出：快速判断预测是否退化为全背景
+        log_volume_distribution(prediction, "Prediction", class_names)
+        log_volume_distribution(label_remapped, "GroundTruth", class_names)
+
         # 计算指标
         dice_scores = compute_dice_scores(prediction, label_remapped, num_classes)
 
+        pred_counts = np.bincount(prediction.ravel(), minlength=num_classes)
+        gt_counts = np.bincount(label_remapped.ravel(), minlength=num_classes)
+
         for cls_idx, dice in dice_scores.items():
             all_dice_scores[cls_idx].append(dice)
+            if (pred_counts[cls_idx] + gt_counts[cls_idx]) > 0:
+                valid_dice_scores[cls_idx].append(dice)
             cls_name = class_names[cls_idx] if cls_idx < len(class_names) else f"Class {cls_idx}"
             logger.info(f"  {cls_name}: Dice={dice:.4f}")
 
@@ -301,6 +424,7 @@ def test(
     logger.info("=" * 60)
 
     avg_dice_scores = {}
+    valid_avg_dice_scores = {}
     for cls_idx in range(num_classes):
         scores = all_dice_scores[cls_idx]
         if scores:
@@ -311,6 +435,10 @@ def test(
             cls_name = class_names[cls_idx] if cls_idx < len(class_names) else f"Class {cls_idx}"
             logger.info(f"{cls_name:20s}: {mean_dice:.4f} ± {std_dice:.4f}")
 
+            valid_scores = valid_dice_scores[cls_idx]
+            if valid_scores:
+                valid_avg_dice_scores[cls_idx] = float(np.mean(valid_scores))
+
     # 前景平均值
     fg_scores = [score for cls_idx, score in avg_dice_scores.items() if cls_idx > 0]
     if fg_scores:
@@ -318,6 +446,18 @@ def test(
         fg_std = np.std(fg_scores)
         logger.info("-" * 60)
         logger.info(f"{'Foreground Mean':20s}: {fg_mean:.4f} ± {fg_std:.4f}")
+
+    # 有效前景平均值：忽略 pred/gt 均为空的类别，避免空对空类别抬高指标
+    valid_fg_scores = [
+        score for cls_idx, score in valid_avg_dice_scores.items()
+        if cls_idx > 0
+    ]
+    if valid_fg_scores:
+        valid_fg_mean = float(np.mean(valid_fg_scores))
+        logger.info(f"{'Valid FG Mean':20s}: {valid_fg_mean:.4f}")
+    else:
+        valid_fg_mean = None
+        logger.info(f"{'Valid FG Mean':20s}: N/A (no foreground class present)")
 
     logger.info("=" * 60)
 
@@ -337,6 +477,10 @@ def test(
         f.write("-" * 60 + "\n")
         if fg_scores:
             f.write(f"Foreground Mean: {np.mean(fg_scores):.4f} ± {np.std(fg_scores):.4f}\n")
+        if valid_fg_mean is not None:
+            f.write(f"Valid FG Mean: {valid_fg_mean:.4f}\n")
+        else:
+            f.write("Valid FG Mean: N/A\n")
 
     logger.info(f"Results saved to {output_dir}")
 
@@ -379,7 +523,7 @@ def main():
     args = parser.parse_args()
 
     # 读取配置
-    with open(args.config, 'r') as f:
+    with open(args.config, 'r', encoding='utf-8-sig') as f:
         config = yaml.safe_load(f)
 
     # 执行测试

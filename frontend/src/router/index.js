@@ -45,7 +45,7 @@ const routes = [
         path: 'mri',
         name: 'MriDetection',
         component: () => import('@/views/MriDetection.vue'),
-        meta: { title: 'MRI 检测' },
+        meta: { title: '影像检测' },
       },
       {
         path: 'report',

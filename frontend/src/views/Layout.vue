@@ -23,13 +23,13 @@
           <el-icon><UserFilled /></el-icon>
           <template #title>新增患者</template>
         </el-menu-item>
-        <el-menu-item index="/ultrasound">
+        <el-menu-item index="/ultrasound" v-if="false">
           <el-icon><VideoCamera /></el-icon>
           <template #title>超声检测</template>
         </el-menu-item>
         <el-menu-item index="/mri">
           <el-icon><PictureFilled /></el-icon>
-          <template #title>MRI 检测</template>
+          <template #title>影像检测</template>
         </el-menu-item>
         <el-menu-item index="/report">
           <el-icon><Document /></el-icon>

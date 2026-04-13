@@ -2,16 +2,17 @@
 诊断报告生成与导出 API
 对接 NLG 模型生成超声/MRI 诊断报告，支持 Word/文本格式导出。
 """
-import base64
-import json
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.responses import Response
 from pydantic import BaseModel, Field
+from sqlalchemy.orm import Session
 
 from api.auth import verify_token
 from core.report import generate_report, export_report_to_docx
+from db.database import get_db
+from db.models import ReportRecord
 from loguru import logger
 
 router = APIRouter(prefix="/reports", tags=["报告生成"])
@@ -74,6 +75,7 @@ class ReportResponse(BaseModel):
 )
 async def generate_diagnosis_report(
     request: ReportRequest,
+    db: Session = Depends(get_db),
     _token: str = Depends(verify_token),
 ) -> ReportResponse:
     """
@@ -99,6 +101,18 @@ async def generate_diagnosis_report(
         f"报告生成完成 | 模态: {request.modality} | "
         f"来源: {result['metadata'].get('source', 'unknown')}"
     )
+
+    report_record = ReportRecord(
+        patient_id=request.patient_info.patient_id,
+        modality=request.modality,
+        source=result["metadata"].get("source", "unknown"),
+        detection_count=len(request.detections),
+        patient_info=request.patient_info.model_dump(),
+        report_data=result["report_data"],
+    )
+    db.add(report_record)
+    db.commit()
+
     return ReportResponse(**result)
 
 
