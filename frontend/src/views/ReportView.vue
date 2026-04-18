@@ -2,7 +2,7 @@
   <div>
     <div class="page-header">
       <h2><el-icon><Document /></el-icon> 诊断报告生成</h2>
-      <el-tag>AI 辅助报告</el-tag>
+      <el-tag>结构化模板报告</el-tag>
     </div>
 
     <!-- 参数输入 -->
@@ -86,7 +86,7 @@
 
           <div v-if="generating" class="generating-tip">
             <el-icon class="is-loading"><Loading /></el-icon>
-            AI 正在生成报告，请稍候...
+            正在按模板生成报告，请稍候...
           </div>
 
           <ReportEditor
@@ -189,7 +189,7 @@ async function exportText() {
     `■ 初步诊断意见\n${reportData.value.preliminary_suggestion}`,
     `■ 建议\n${reportData.value.recommendations}`,
     '',
-    '【声明】本报告由 AI 辅助生成，仅供临床参考。',
+    '【声明】本报告由系统根据检测结果按固定模板自动生成，仅供临床参考。',
   ].join('\n')
 
   await navigator.clipboard.writeText(text)

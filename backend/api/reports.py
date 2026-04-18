@@ -1,8 +1,9 @@
 """
 诊断报告生成与导出 API
-对接 NLG 模型生成超声/MRI 诊断报告，支持 Word/文本格式导出。
+基于检测结果按固定医学模板生成超声/MRI 诊断报告，支持 Word/文本格式导出。
 """
 from typing import Any, Dict, List, Optional
+from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.responses import Response
@@ -79,10 +80,7 @@ async def generate_diagnosis_report(
     _token: str = Depends(verify_token),
 ) -> ReportResponse:
     """
-    基于影像检测结果和患者信息，通过 NLG 模型（阿里百炼 API）生成诊断报告。
-
-    - 当 `DASHSCOPE_API_KEY` 已配置时，调用真实 API 生成报告
-    - 未配置时使用演示模式，返回示例报告
+    基于影像检测结果和患者信息，按固定医学模板生成诊断报告。
     """
     try:
         result = await generate_report(
@@ -152,12 +150,18 @@ async def export_report_docx(
 
     patient_name = request.patient_info.name.replace(" ", "_")
     filename = f"CHD_Report_{patient_name}.docx"
+    # HTTP 头必须是 latin-1，可用 filename* 传 UTF-8 文件名并保留 ASCII 回退名
+    encoded_filename = quote(filename)
+    content_disposition = (
+        'attachment; filename="CHD_Report.docx"; '
+        f"filename*=UTF-8''{encoded_filename}"
+    )
 
     logger.info(f"报告 Word 导出完成 | 文件: {filename}")
     return Response(
         content=docx_bytes,
         media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        headers={"Content-Disposition": content_disposition},
     )
 
 
@@ -202,7 +206,7 @@ async def export_report_text(
         f"【初步诊断意见】\n{data.get('preliminary_suggestion', '')}\n\n"
         f"【建议】\n{data.get('recommendations', '')}\n"
         f"{'='*60}\n"
-        f"【声明】本报告由 AI 辅助生成，仅供临床参考，不作为最终诊断依据。\n"
+        f"【声明】本报告由系统根据检测结果按固定模板自动生成，仅供临床参考，不作为最终诊断依据。\n"
     )
 
     return {
