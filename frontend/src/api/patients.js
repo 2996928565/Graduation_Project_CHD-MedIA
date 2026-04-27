@@ -6,8 +6,8 @@ export function createPatient(data) {
 }
 
 /** 获取患者列表 */
-export function getPatients() {
-  return request.get('/patients')
+export function getPatients(params = {}) {
+  return request.get('/patients', { params })
 }
 
 /** 获取患者详情 */

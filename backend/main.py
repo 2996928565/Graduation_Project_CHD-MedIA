@@ -1,8 +1,12 @@
-"""
-CHD-MedIA 后端主入口
+"""CHD-MedIA 后端主入口
+
 基于深度学习的先心病影像异常检测与报告生成系统 - FastAPI Web 服务
 """
-from fastapi import FastAPI, Depends, status
+
+from datetime import datetime
+from typing import Optional
+
+from fastapi import FastAPI, Depends, status, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
@@ -11,7 +15,7 @@ from pydantic import BaseModel
 import utils.logger  # noqa: F401
 
 from config.settings import settings
-from api.auth import authenticate_user, create_access_token, init_admin
+from api.auth import authenticate_user, create_access_token, init_admin, hash_password, require_admin
 from api.patients import router as patients_router
 from api.images import router as images_router
 from api.reports import router as reports_router
@@ -68,6 +72,29 @@ class LoginRequest(BaseModel):
     password: str
 
 
+class RegisterRequest(BaseModel):
+    username: str
+    password: str
+    full_name: Optional[str] = None
+    role: str = "doctor"  # admin / doctor
+    is_active: bool = True
+
+
+class RegisterResponse(BaseModel):
+    id: int
+    username: str
+    full_name: Optional[str] = None
+    role: str
+    is_active: bool
+    created_at: datetime
+
+
+class PublicRegisterRequest(BaseModel):
+    username: str
+    password: str
+    full_name: Optional[str] = None
+
+
 @app.post(
     "/api/v1/auth/login",
     tags=["认证"],
@@ -89,6 +116,115 @@ def login(request: LoginRequest, db: Session = Depends(get_db)):
         "full_name": user.full_name,
         "role": user.role,
     }
+
+
+@app.post(
+    "/api/v1/auth/register",
+    tags=["认证"],
+    summary="管理员创建用户（注册）",
+    response_model=RegisterResponse,
+)
+def register(
+    request: RegisterRequest,
+    db: Session = Depends(get_db),
+    _admin: User = Depends(require_admin),
+):
+    """创建新用户（仅管理员可调用）。
+
+    - 角色仅支持：admin / doctor
+    - username 必须唯一
+    """
+
+    username = (request.username or "").strip()
+    password = request.password or ""
+    role = (request.role or "doctor").strip().lower()
+
+    if not username:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="username 不能为空")
+    if len(username) > 50:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="username 过长")
+    if len(password) < 6:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="password 至少 6 位")
+    if role not in {"admin", "doctor"}:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="role 仅支持 admin / doctor")
+
+    existing = db.query(User).filter(User.username == username).first()
+    if existing:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="用户名已存在")
+
+    user = User(
+        username=username,
+        password_hash=hash_password(password),
+        full_name=(request.full_name or None),
+        role=role,
+        is_active=bool(request.is_active),
+    )
+    db.add(user)
+    db.commit()
+    db.refresh(user)
+
+    return RegisterResponse(
+        id=int(user.id),
+        username=user.username,
+        full_name=user.full_name,
+        role=user.role,
+        is_active=bool(user.is_active),
+        created_at=user.created_at,
+    )
+
+
+@app.post(
+    "/api/v1/auth/register-public",
+    tags=["认证"],
+    summary="用户自助注册（可配置开关）",
+    response_model=RegisterResponse,
+)
+def register_public(request: PublicRegisterRequest, db: Session = Depends(get_db)):
+    """用户自助注册。
+
+    - 仅创建 doctor 角色账号
+    - 受配置项 auth.allow_public_register 控制，默认关闭
+    """
+
+    if not settings.allow_public_register:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="当前未开放自助注册，请联系管理员创建账号",
+        )
+
+    username = (request.username or "").strip()
+    password = request.password or ""
+
+    if not username:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="username 不能为空")
+    if len(username) > 50:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="username 过长")
+    if len(password) < 6:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="password 至少 6 位")
+
+    existing = db.query(User).filter(User.username == username).first()
+    if existing:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="用户名已存在")
+
+    user = User(
+        username=username,
+        password_hash=hash_password(password),
+        full_name=(request.full_name or None),
+        role="doctor",
+        is_active=True,
+    )
+    db.add(user)
+    db.commit()
+    db.refresh(user)
+
+    return RegisterResponse(
+        id=int(user.id),
+        username=user.username,
+        full_name=user.full_name,
+        role=user.role,
+        is_active=bool(user.is_active),
+        created_at=user.created_at,
+    )
 
 
 # ── 健康检查 ──────────────────────────────────────────────────────────────────

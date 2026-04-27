@@ -10,19 +10,40 @@
     <!-- 摘要统计 -->
     <el-row :gutter="12" style="margin-bottom:16px">
       <el-col :span="8">
-        <el-statistic title="检测耗时" :value="result.processing_time_s" suffix="秒" />
+        <el-statistic title="检测耗时" :value="displayResult.processing_time_s" suffix="秒" />
       </el-col>
       <el-col :span="8">
-        <el-statistic title="检测项数" :value="result.detections.length" />
+        <el-statistic title="检测项数" :value="displayResult.detections.length" />
       </el-col>
       <el-col :span="8">
         <el-statistic title="异常项数" :value="abnormalCount" />
       </el-col>
     </el-row>
 
+    <el-card
+      v-if="isNifti3D"
+      shadow="never"
+      style="margin-bottom:12px"
+    >
+      <template #header>
+        <span class="card-title">3D 体数据逐层浏览</span>
+      </template>
+      <div class="slice-controls">
+        <div class="slice-label">切片：{{ currentSlice + 1 }} / {{ volumeDepth }}</div>
+        <el-slider
+          v-model="currentSlice"
+          :min="0"
+          :max="Math.max(volumeDepth - 1, 0)"
+          :step="1"
+          :show-tooltip="false"
+          @change="loadSlice"
+        />
+      </div>
+    </el-card>
+
     <el-alert
-      v-if="result.inference_mode"
-      :title="`推理模式：${result.inference_mode}`"
+      v-if="displayResult.inference_mode"
+      :title="`推理模式：${displayResult.inference_mode}`"
       type="info"
       :closable="false"
       style="margin-bottom:12px"
@@ -33,21 +54,25 @@
       <el-col :span="12">
         <div class="annotated-image-wrap">
           <p class="section-title">标注影像</p>
+          <div v-if="sliceLoading" class="slice-loading">
+            <el-icon class="is-loading"><Loading /></el-icon>
+            正在加载切片...
+          </div>
           <img
-            :src="`data:image/png;base64,${result.annotated_image_base64}`"
+            :src="`data:image/png;base64,${displayResult.annotated_image_base64}`"
             alt="标注影像"
             class="annotated-image"
           />
         </div>
 
         <div
-          v-if="result.segmentation_mask_base64"
+          v-if="displayResult.segmentation_mask_base64"
           class="annotated-image-wrap"
           style="margin-top:10px"
         >
           <p class="section-title">分割 Mask</p>
           <img
-            :src="`data:image/png;base64,${result.segmentation_mask_base64}`"
+            :src="`data:image/png;base64,${displayResult.segmentation_mask_base64}`"
             alt="分割掩码"
             class="annotated-image"
           />
@@ -76,11 +101,11 @@
       <!-- 检测列表 -->
       <el-col :span="12">
         <p class="section-title">检测结果列表</p>
-        <div v-if="result.detections.length === 0">
+        <div v-if="displayResult.detections.length === 0">
           <el-empty description="未检测到异常" :image-size="60" />
         </div>
         <div
-          v-for="(det, i) in result.detections"
+          v-for="(det, i) in displayResult.detections"
           :key="i"
           class="det-card"
           :class="{ 'det-normal': det.label === '正常', 'det-abnormal': det.label !== '正常' }"
@@ -132,19 +157,92 @@
 </template>
 
 <script setup>
-import { computed } from 'vue'
+import { computed, ref, watch } from 'vue'
+import { getNiftiSlice } from '@/api/images.js'
 
 const props = defineProps({
   result: { type: Object, required: true },
   modality: { type: String, default: 'ultrasound' },
+  confidenceThreshold: { type: Number, default: 0.5 },
 })
 
+const isNifti3D = computed(() => {
+  const meta = props.result?.dicom_metadata || {}
+  return props.modality === 'mri' && String(meta.format || '').toLowerCase() === 'nifti'
+})
+
+const volumeDepth = computed(() => {
+  const meta = props.result?.dicom_metadata || {}
+  const shape = meta.nifti_shape
+  return Array.isArray(shape) && shape.length > 0 ? Number(shape[0] || 0) : 0
+})
+
+const currentSlice = ref(0)
+const sliceLoading = ref(false)
+const sliceResult = ref(null)
+let sliceRequestId = 0
+
+watch(
+  () => props.result,
+  (val) => {
+    if (!val) return
+    if (!isNifti3D.value) {
+      sliceResult.value = null
+      return
+    }
+    const meta = val.dicom_metadata || {}
+    const idx = Number(meta.slice_index ?? 0)
+    currentSlice.value = Number.isFinite(idx) ? idx : 0
+    loadSlice(currentSlice.value)
+  },
+  { immediate: true },
+)
+
+async function loadSlice() {
+  if (!isNifti3D.value) return
+  const taskId = props.result?.task_id
+  if (!taskId) return
+  const depth = volumeDepth.value
+  if (depth <= 0) return
+  if (currentSlice.value < 0 || currentSlice.value >= depth) return
+
+  const requestId = ++sliceRequestId
+  sliceLoading.value = true
+  try {
+    const res = await getNiftiSlice(taskId, currentSlice.value, props.confidenceThreshold)
+    if (requestId !== sliceRequestId) return
+    sliceResult.value = {
+      ...props.result,
+      detections: res.detections || [],
+      annotated_image_base64: res.annotated_image_base64,
+      segmentation_mask_base64: res.segmentation_mask_base64,
+      processing_time_s: res.processing_time_s,
+      inference_mode: res.inference_mode,
+    }
+  } finally {
+    if (requestId === sliceRequestId) {
+      sliceLoading.value = false
+    }
+  }
+}
+
+watch(
+  () => props.confidenceThreshold,
+  () => {
+    if (isNifti3D.value) {
+      loadSlice()
+    }
+  },
+)
+
+const displayResult = computed(() => sliceResult.value || props.result)
+
 const abnormalCount = computed(
-  () => props.result.detections.filter((d) => d.label !== '正常').length,
+  () => displayResult.value.detections.filter((d) => d.label !== '正常').length,
 )
 
 const showSegmentationLegend = computed(
-  () => props.modality === 'mri' && Boolean(props.result.segmentation_mask_base64),
+  () => props.modality === 'mri' && Boolean(displayResult.value.segmentation_mask_base64),
 )
 
 const segmentationLegend = [
@@ -159,9 +257,9 @@ const segmentationLegend = [
 ]
 
 function downloadSegmentationMask() {
-  if (!props.result.segmentation_mask_base64) return
+  if (!displayResult.value.segmentation_mask_base64) return
   const a = document.createElement('a')
-  a.href = `data:image/png;base64,${props.result.segmentation_mask_base64}`
+  a.href = `data:image/png;base64,${displayResult.value.segmentation_mask_base64}`
   a.download = 'segmentation_mask.png'
   a.click()
 }
@@ -242,5 +340,25 @@ function downloadSegmentationMask() {
 .seg-label {
   font-size: 12px;
   color: #35526f;
+}
+
+.card-title { font-weight: 600; color: #1a3a5c; }
+.slice-controls {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.slice-label {
+  font-size: 12px;
+  color: #35526f;
+  min-width: 120px;
+}
+.slice-loading {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: #5a7fa0;
+  margin-bottom: 6px;
 }
 </style>

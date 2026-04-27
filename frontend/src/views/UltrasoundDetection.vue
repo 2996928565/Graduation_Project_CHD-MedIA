@@ -105,9 +105,19 @@ import DetectionResult from '@/components/DetectionResult.vue'
 const route = useRoute()
 const router = useRouter()
 
+function parseQueryAge(v) {
+  if (v === undefined || v === null || v === '') return null
+  const n = Number(v)
+  return Number.isFinite(n) ? n : null
+}
+
+function normalizeSex(v) {
+  return ['男', '女', '未知'].includes(v) ? v : '未知'
+}
+
 const patientName = ref(route.query.name || '')
-const patientAge = ref(null)
-const patientSex = ref('未知')
+const patientAge = ref(parseQueryAge(route.query.age))
+const patientSex = ref(normalizeSex(route.query.sex))
 const threshold = ref(0.5)
 
 const selectedFile = ref(null)

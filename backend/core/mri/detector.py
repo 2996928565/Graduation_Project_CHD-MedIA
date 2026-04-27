@@ -187,7 +187,10 @@ class MRIDetector:
         if self.model is None:
             raise RuntimeError("MRI 分割模型未加载成功，无法执行 NIfTI 3D 推理")
 
-        center_seg_map, center_seg_probs, inference_slice_shape = self._real_inference_3d(volume_arr)
+        center_seg_map, center_seg_probs, inference_slice_shape = self._real_inference_3d(
+            volume_arr,
+            slice_index=int(depth // 2),
+        )
 
         center_idx = int(depth // 2)
         center_image = normalize_intensity(volume_arr)[center_idx]
@@ -228,6 +231,68 @@ class MRIDetector:
             "center_slice_index": center_idx,
         }
 
+    def detect_nifti_slice(
+        self,
+        volume_arr: np.ndarray,
+        slice_index: int,
+        confidence_threshold: float = 0.5,
+    ) -> Dict[str, Any]:
+        """对 NIfTI 3D 体数据指定切片执行分割推理（用于前端3D逐层展示）。"""
+        start_time = time.time()
+
+        if volume_arr.ndim != 3:
+            raise ValueError(f"NIfTI 体数据维度应为3D，当前为 {volume_arr.shape}")
+
+        depth, height, width = volume_arr.shape
+        if slice_index < 0 or slice_index >= depth:
+            raise ValueError(f"slice_index 越界: {slice_index}，有效范围 0-{depth - 1}")
+
+        if self.model is None:
+            raise RuntimeError("MRI 分割模型未加载成功，无法执行 NIfTI 3D 推理")
+
+        seg_map, seg_probs, inference_slice_shape = self._real_inference_3d(
+            volume_arr,
+            slice_index=int(slice_index),
+        )
+
+        slice_image = normalize_intensity(volume_arr)[slice_index]
+        slice_gray = (np.clip(slice_image, 0, 1) * 255).astype(np.uint8)
+        slice_bgr = cv2.cvtColor(slice_gray, cv2.COLOR_GRAY2BGR)
+
+        slice_mask = ((seg_map > 0) * 255).astype(np.uint8)
+        detections = self._seg_map_to_detections(seg_map, seg_probs, confidence_threshold)
+        detections = self._rescale_detections(
+            detections,
+            from_size=inference_slice_shape,
+            to_size=(height, width),
+        )
+
+        annotated = overlay_segmentation_mask(slice_bgr, slice_mask, alpha=0.35)
+        annotated = draw_detections(annotated, detections, color=(255, 0, 0))
+        annotated_bytes = to_png_bytes(annotated)
+
+        segmentation_vis = self._colorize_segmentation(seg_map)
+        segmentation_mask_bytes = to_png_bytes(segmentation_vis)
+
+        elapsed = time.time() - start_time
+        anomaly_count = len([d for d in detections if d["label"] not in NORMAL_LABELS])
+        logger.info(
+            f"MRI NIfTI slice推理完成 | slice={slice_index} | 耗时 {elapsed:.2f}s | 发现 {anomaly_count} 处异常"
+        )
+
+        return {
+            "modality": "mri",
+            "detections": detections,
+            "segmentation_available": True,
+            "annotated_image_bytes": annotated_bytes,
+            "segmentation_mask_bytes": segmentation_mask_bytes,
+            "processing_time_s": round(elapsed, 3),
+            "image_size": {"width": width, "height": height},
+            "inference_mode": "real-3d-slice",
+            "slice_index": int(slice_index),
+            "volume_depth": int(depth),
+        }
+
     def _real_inference(
         self, image: np.ndarray, threshold: float
     ):
@@ -262,8 +327,11 @@ class MRIDetector:
         detections = self._seg_map_to_detections(seg_map, seg_probs, threshold)
         return detections, mask, seg_map
 
-    def _real_inference_3d(self, volume_arr: np.ndarray):
-        """对 3D 体数据执行滑窗推理并返回中心切片结果。"""
+    def _real_inference_3d(self, volume_arr: np.ndarray, slice_index: Optional[int] = None):
+        """对 3D 体数据执行滑窗推理并返回指定切片结果。
+
+        为控制内存占用，仅聚合覆盖目标切片（depth 索引）的 patch。
+        """
         import torch
         import torch.nn.functional as F
 
@@ -297,7 +365,8 @@ class MRIDetector:
         h_starts = _window_starts(padded_h, patch_h, stride_h)
         w_starts = _window_starts(padded_w, patch_w, stride_w)
 
-        center_idx = depth // 2
+        center_idx = int(depth // 2) if slice_index is None else int(slice_index)
+        center_idx = max(0, min(center_idx, depth - 1))
         num_classes = len(MRI_CLASSES)
         center_prob_sum = np.zeros((num_classes, padded_h, padded_w), dtype=np.float32)
         center_count = np.zeros((padded_h, padded_w), dtype=np.float32)
@@ -306,7 +375,7 @@ class MRIDetector:
         with torch.no_grad():
             for d_start in d_starts:
                 d_end = d_start + patch_d
-                # 仅聚合覆盖中心深度切片的 patch，显著降低内存占用。
+                # 仅聚合覆盖目标深度切片的 patch，显著降低内存占用。
                 if not (d_start <= center_idx < d_end):
                     continue
 

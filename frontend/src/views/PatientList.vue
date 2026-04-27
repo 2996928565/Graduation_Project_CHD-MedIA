@@ -7,6 +7,31 @@
       </el-button>
     </div>
 
+    <el-card shadow="never" class="search-card">
+      <el-form :inline="true" :model="filters" @submit.prevent>
+        <el-form-item label="患者姓名">
+          <el-input
+            v-model="filters.name"
+            placeholder="输入姓名关键字"
+            clearable
+            @keyup.enter="fetchPatients"
+          />
+        </el-form-item>
+        <el-form-item v-if="isAdmin" label="申请医生">
+          <el-input
+            v-model="filters.doctor"
+            placeholder="输入医生姓名关键字"
+            clearable
+            @keyup.enter="fetchPatients"
+          />
+        </el-form-item>
+        <el-form-item>
+          <el-button type="primary" @click="fetchPatients">搜索</el-button>
+          <el-button @click="handleReset">重置</el-button>
+        </el-form-item>
+      </el-form>
+    </el-card>
+
     <el-card shadow="never">
       <el-table
         v-loading="loading"
@@ -68,24 +93,44 @@
 </template>
 
 <script setup>
-import { ref, onMounted } from 'vue'
+import { ref, onMounted, computed } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { getPatients, deletePatient } from '@/api/patients.js'
+import { useAuthStore } from '@/store/auth.js'
 
 const router = useRouter()
+const authStore = useAuthStore()
 const loading = ref(false)
 const patients = ref([])
+const filters = ref({
+  name: '',
+  doctor: '',
+})
+
+const isAdmin = computed(() => (authStore.role || '').toLowerCase() === 'admin')
 
 onMounted(fetchPatients)
 
 async function fetchPatients() {
   loading.value = true
   try {
-    patients.value = await getPatients()
+    const params = {
+      name: (filters.value.name || '').trim(),
+    }
+    if (isAdmin.value) {
+      params.doctor = (filters.value.doctor || '').trim()
+    }
+    patients.value = await getPatients(params)
   } finally {
     loading.value = false
   }
+}
+
+function handleReset() {
+  filters.value.name = ''
+  filters.value.doctor = ''
+  fetchPatients()
 }
 
 function modalityLabel(m) {
@@ -98,7 +143,15 @@ function formatDate(iso) {
 
 function goDetect(patient, modality) {
   const route = modality === 'mri' ? '/mri' : '/ultrasound'
-  router.push({ path: route, query: { patientId: patient.patient_id, name: patient.name } })
+  router.push({
+    path: route,
+    query: {
+      patientId: patient.patient_id,
+      name: patient.name,
+      age: patient.age,
+      sex: patient.sex,
+    },
+  })
 }
 
 function goEdit(patient) {
@@ -135,5 +188,9 @@ async function handleDelete(patient) {
 .page-header h2 {
   margin: 0;
   color: #1a3a5c;
+}
+
+.search-card {
+  margin-bottom: 16px;
 }
 </style>

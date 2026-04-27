@@ -53,6 +53,12 @@ const routes = [
         component: () => import('@/views/ReportView.vue'),
         meta: { title: '报告生成' },
       },
+      {
+        path: 'admin/users',
+        name: 'AdminUsers',
+        component: () => import('@/views/AdminUsers.vue'),
+        meta: { title: '用户管理', requiresAdmin: true },
+      },
     ],
   },
   {
@@ -71,6 +77,10 @@ router.beforeEach((to) => {
   const authStore = useAuthStore()
   if (to.meta.requiresAuth !== false && !authStore.isLoggedIn) {
     return { name: 'Login' }
+  }
+
+  if (to.meta.requiresAdmin && (authStore.role || '').toLowerCase() !== 'admin') {
+    return { path: '/' }
   }
 })
 

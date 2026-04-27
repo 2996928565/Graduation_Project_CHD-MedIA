@@ -10,9 +10,9 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
-from api.auth import verify_token
+from api.auth import get_current_user
 from db.database import get_db
-from db.models import Patient
+from db.models import Patient, User
 from loguru import logger
 
 router = APIRouter(prefix="/patients", tags=["患者管理"])
@@ -98,6 +98,42 @@ def _to_response(p: Patient) -> PatientResponse:
     )
 
 
+def _is_admin(user: User) -> bool:
+    return (user.role or "").lower() == "admin"
+
+
+def _doctor_label(user: User) -> str:
+    return ((user.full_name or "").strip() or (user.username or "").strip())
+
+
+def _scoped_patient_query(db: Session, current_user: User):
+    query = db.query(Patient)
+    if _is_admin(current_user):
+        return query
+
+    labels = []
+    full_name = (current_user.full_name or "").strip()
+    username = (current_user.username or "").strip()
+    if full_name:
+        labels.append(full_name)
+    if username and username not in labels:
+        labels.append(username)
+
+    if not labels:
+        return query.filter(Patient.id == "__no_access__")
+    return query.filter(Patient.referring_doctor.in_(labels))
+
+
+def _get_scoped_patient_or_404(db: Session, patient_id: str, current_user: User) -> Patient:
+    patient = _scoped_patient_query(db, current_user).filter(Patient.id == patient_id).first()
+    if not patient:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"患者 ID {patient_id} 不存在或无权访问",
+        )
+    return patient
+
+
 # ── API 路由 ──────────────────────────────────────────────────────────────────
 
 @router.post(
@@ -109,9 +145,13 @@ def _to_response(p: Patient) -> PatientResponse:
 def create_patient(
     data: PatientCreate,
     db: Session = Depends(get_db),
-    _user: str = Depends(verify_token),
+    current_user: User = Depends(get_current_user),
 ) -> PatientResponse:
     """录入患者基本信息及先心病筛查相关字段。"""
+    referring_doctor = data.referring_doctor
+    if not _is_admin(current_user):
+        referring_doctor = _doctor_label(current_user)
+
     patient = Patient(
         id=str(uuid.uuid4()),
         name=data.name,
@@ -123,7 +163,7 @@ def create_patient(
         exam_modality=data.exam_modality,
         chief_complaint=data.chief_complaint,
         medical_history=data.medical_history,
-        referring_doctor=data.referring_doctor,
+        referring_doctor=referring_doctor,
         department=data.department,
         created_at=datetime.now(),
         updated_at=datetime.now(),
@@ -141,11 +181,21 @@ def create_patient(
     summary="获取所有患者列表",
 )
 def list_patients(
+    name: Optional[str] = None,
+    doctor: Optional[str] = None,
     db: Session = Depends(get_db),
-    _user: str = Depends(verify_token),
+    current_user: User = Depends(get_current_user),
 ) -> List[PatientResponse]:
     """返回所有已录入患者的信息列表。"""
-    patients = db.query(Patient).order_by(Patient.created_at.desc()).all()
+    query = _scoped_patient_query(db, current_user)
+
+    if name and name.strip():
+        query = query.filter(Patient.name.like(f"%{name.strip()}%"))
+
+    if _is_admin(current_user) and doctor and doctor.strip():
+        query = query.filter(Patient.referring_doctor.like(f"%{doctor.strip()}%"))
+
+    patients = query.order_by(Patient.created_at.desc()).all()
     return [_to_response(p) for p in patients]
 
 
@@ -157,15 +207,10 @@ def list_patients(
 def get_patient(
     patient_id: str,
     db: Session = Depends(get_db),
-    _user: str = Depends(verify_token),
+    current_user: User = Depends(get_current_user),
 ) -> PatientResponse:
     """根据患者 ID 获取详细信息。"""
-    patient = db.query(Patient).filter(Patient.id == patient_id).first()
-    if not patient:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"患者 ID {patient_id} 不存在",
-        )
+    patient = _get_scoped_patient_or_404(db, patient_id, current_user)
     return _to_response(patient)
 
 
@@ -178,17 +223,16 @@ def update_patient(
     patient_id: str,
     data: PatientUpdate,
     db: Session = Depends(get_db),
-    _user: str = Depends(verify_token),
+    current_user: User = Depends(get_current_user),
 ) -> PatientResponse:
     """部分更新患者信息。"""
-    patient = db.query(Patient).filter(Patient.id == patient_id).first()
-    if not patient:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"患者 ID {patient_id} 不存在",
-        )
+    patient = _get_scoped_patient_or_404(db, patient_id, current_user)
 
-    for field, value in data.model_dump(exclude_none=True).items():
+    payload = data.model_dump(exclude_none=True)
+    if not _is_admin(current_user):
+        payload["referring_doctor"] = _doctor_label(current_user)
+
+    for field, value in payload.items():
         setattr(patient, field, value)
     patient.updated_at = datetime.now()
 
@@ -206,15 +250,10 @@ def update_patient(
 def delete_patient(
     patient_id: str,
     db: Session = Depends(get_db),
-    _user: str = Depends(verify_token),
+    current_user: User = Depends(get_current_user),
 ) -> None:
     """删除指定患者的信息。"""
-    patient = db.query(Patient).filter(Patient.id == patient_id).first()
-    if not patient:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"患者 ID {patient_id} 不存在",
-        )
+    patient = _get_scoped_patient_or_404(db, patient_id, current_user)
     db.delete(patient)
     db.commit()
     logger.info(f"患者信息已删除 | ID: {patient_id}")

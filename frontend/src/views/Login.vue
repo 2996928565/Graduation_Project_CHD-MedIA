@@ -7,12 +7,17 @@
         <p class="login-subtitle">先天性心脏病影像检测与报告生成系统</p>
       </div>
 
+      <el-tabs v-model="activeTab" stretch class="login-tabs">
+        <el-tab-pane label="登录" name="login" />
+        <el-tab-pane label="注册" name="register" />
+      </el-tabs>
+
       <el-form
         ref="formRef"
         :model="form"
         :rules="rules"
         label-position="top"
-        @submit.prevent="handleLogin"
+        @submit.prevent="handleSubmit"
       >
         <el-form-item label="用户名" prop="username">
           <el-input
@@ -20,7 +25,7 @@
             placeholder="请输入用户名"
             size="large"
             prefix-icon="User"
-            @keyup.enter="handleLogin"
+            @keyup.enter="handleSubmit"
           />
         </el-form-item>
 
@@ -32,7 +37,29 @@
             show-password
             size="large"
             prefix-icon="Lock"
-            @keyup.enter="handleLogin"
+            @keyup.enter="handleSubmit"
+          />
+        </el-form-item>
+
+        <el-form-item v-if="isRegister" label="确认密码" prop="confirmPassword">
+          <el-input
+            v-model="form.confirmPassword"
+            type="password"
+            placeholder="请再次输入密码"
+            show-password
+            size="large"
+            prefix-icon="Lock"
+            @keyup.enter="handleSubmit"
+          />
+        </el-form-item>
+
+        <el-form-item v-if="isRegister" label="姓名（可选）" prop="fullName">
+          <el-input
+            v-model="form.fullName"
+            placeholder="昵称"
+            size="large"
+            prefix-icon="User"
+            @keyup.enter="handleSubmit"
           />
         </el-form-item>
 
@@ -42,9 +69,9 @@
             size="large"
             :loading="loading"
             style="width: 100%"
-            @click="handleLogin"
+            @click="handleSubmit"
           >
-            登 录
+            {{ isRegister ? '注 册' : '登 录' }}
           </el-button>
         </el-form-item>
       </el-form>
@@ -53,29 +80,77 @@
 </template>
 
 <script setup>
-import { ref, reactive } from 'vue'
+import { ref, reactive, computed, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { useAuthStore } from '@/store/auth.js'
-import { login } from '@/api/auth.js'
+import { login, registerPublic } from '@/api/auth.js'
 
 const router = useRouter()
 const authStore = useAuthStore()
 
 const formRef = ref(null)
 const loading = ref(false)
-const form = reactive({ username: '', password: '' })
+const activeTab = ref('login')
+const isRegister = computed(() => activeTab.value === 'register')
 
-const rules = {
-  username: [{ required: true, message: '请输入用户名', trigger: 'blur' }],
-  password: [{ required: true, message: '请输入密码', trigger: 'blur' }],
-}
+const form = reactive({
+  username: '',
+  password: '',
+  confirmPassword: '',
+  fullName: '',
+})
 
-async function handleLogin() {
+watch(activeTab, () => {
+  form.password = ''
+  form.confirmPassword = ''
+  formRef.value?.clearValidate?.()
+})
+
+const rules = computed(() => {
+  const base = {
+    username: [{ required: true, message: '请输入用户名', trigger: 'blur' }],
+    password: [{ required: true, message: '请输入密码', trigger: 'blur' }],
+  }
+
+  if (!isRegister.value) {
+    return base
+  }
+
+  return {
+    ...base,
+    password: [
+      { required: true, message: '请输入密码', trigger: 'blur' },
+      { min: 6, message: '密码至少 6 位', trigger: 'blur' },
+    ],
+    confirmPassword: [
+      { required: true, message: '请再次输入密码', trigger: 'blur' },
+      {
+        validator: (_rule, value, callback) => {
+          if (!value) return callback(new Error('请再次输入密码'))
+          if (value !== form.password) return callback(new Error('两次密码不一致'))
+          return callback()
+        },
+        trigger: 'blur',
+      },
+    ],
+  }
+})
+
+async function handleSubmit() {
   await formRef.value?.validate(async (valid) => {
     if (!valid) return
     loading.value = true
     try {
+      if (isRegister.value) {
+        await registerPublic(
+          form.username.trim(),
+          form.password,
+          form.fullName?.trim() || null,
+        )
+        ElMessage.success('注册成功，正在为你登录...')
+      }
+
       const res = await login(form.username, form.password)
       authStore.setAuth(res)
       ElMessage.success(`欢迎回来，${res.full_name || res.username}`)
@@ -109,6 +184,10 @@ async function handleLogin() {
 .login-header {
   text-align: center;
   margin-bottom: 32px;
+}
+
+.login-tabs {
+  margin-bottom: 18px;
 }
 
 .login-logo {

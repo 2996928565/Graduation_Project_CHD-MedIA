@@ -32,3 +32,19 @@ export function detectImage(file, modality, confidenceThreshold = 0.5, patientId
     timeout: 300000, // 5 分钟（大影像检测）
   })
 }
+
+/**
+ * 获取 NIfTI 3D 指定切片的展示结果（标注图 + mask + 检测列表）
+ * @param {string} taskId
+ * @param {number} sliceIndex
+ * @param {number} confidenceThreshold
+ */
+export function getNiftiSlice(taskId, sliceIndex, confidenceThreshold = 0.5) {
+  return request.get(`/images/nifti-slice/${taskId}`, {
+    params: {
+      slice_index: sliceIndex,
+      confidence_threshold: String(confidenceThreshold),
+    },
+    timeout: 300000,
+  })
+}

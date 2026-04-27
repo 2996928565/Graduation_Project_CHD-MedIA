@@ -97,6 +97,30 @@ def verify_token(
     return username
 
 
+def get_current_user(
+    username: str = Depends(verify_token),
+    db: Session = Depends(get_db),
+) -> User:
+    """FastAPI 依赖：从 Token 解析出的用户名加载当前用户。"""
+    user = db.query(User).filter(User.username == username, User.is_active == True).first()
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="用户不存在或已被禁用",
+        )
+    return user
+
+
+def require_admin(current_user: User = Depends(get_current_user)) -> User:
+    """FastAPI 依赖：要求当前用户为管理员。"""
+    if (current_user.role or "").lower() != "admin":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="权限不足：需要管理员权限",
+        )
+    return current_user
+
+
 # ── 管理员初始化 ───────────────────────────────────────────────────────────────
 
 def init_admin(db: Session) -> bool:

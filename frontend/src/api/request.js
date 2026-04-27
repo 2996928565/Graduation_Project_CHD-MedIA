@@ -31,7 +31,7 @@ request.interceptors.response.use(
 
     const messages = {
       401: '认证失败，请重新登录',
-      403: '权限不足',
+      403: detail || '权限不足',
       404: '请求的资源不存在',
       413: '文件过大，请压缩后重试',
       422: `参数校验失败：${detail || '请检查输入'}`,

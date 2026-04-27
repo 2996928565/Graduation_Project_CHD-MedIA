@@ -18,8 +18,11 @@ raw_data/
 
 # API 密钥与环境变量
 backend/.env
+.env
+.env.*
 .env.local
 .env.production
+config.local.yaml
 
 # 前端构建产物与依赖
 frontend/node_modules/
@@ -251,3 +254,4 @@ __marimo__/
 output_slices/
 predictions/
 quick_test_result/
+docs/

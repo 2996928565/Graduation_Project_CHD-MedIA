@@ -35,6 +35,11 @@
           <el-icon><Document /></el-icon>
           <template #title>报告生成</template>
         </el-menu-item>
+
+        <el-menu-item index="/admin/users" v-if="isAdmin">
+          <el-icon><User /></el-icon>
+          <template #title>用户管理</template>
+        </el-menu-item>
       </el-menu>
 
       <div class="aside-footer">
@@ -60,7 +65,7 @@
           <el-dropdown @command="handleCommand">
             <el-button text>
               <el-icon><Avatar /></el-icon>
-              医生账户
+              {{ currentUserLabel }}
               <el-icon class="el-icon--right"><ArrowDown /></el-icon>
             </el-button>
             <template #dropdown>
@@ -94,6 +99,9 @@ const authStore = useAuthStore()
 const collapsed = ref(false)
 const activeMenu = computed(() => route.path)
 const currentTitle = computed(() => route.meta?.title || 'CHD-MedIA')
+
+const isAdmin = computed(() => (authStore.role || '').toLowerCase() === 'admin')
+const currentUserLabel = computed(() => authStore.fullName || authStore.username || '账户')
 
 function handleCommand(cmd) {
   if (cmd === 'logout') {

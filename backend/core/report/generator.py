@@ -1,15 +1,20 @@
 """
 结构化诊断报告生成模块
-基于检测结果按固定医学模板生成报告，避免依赖语言模型。
+默认基于检测结果按固定医学模板生成报告；如配置了 DashScope/Qwen API Key，
+可优先使用自然语言模型生成更自然的医学表述，失败自动回退到模板。
 """
 from datetime import datetime
 from io import BytesIO
+import json
 from typing import Any, Dict, List
 
 from loguru import logger
 from docx import Document
 from docx.shared import Pt, RGBColor
 from docx.enum.text import WD_ALIGN_PARAGRAPH
+
+from config.settings import settings
+from core.report.qwen_client import QwenClientError, chat_completions
 
 
 def _build_detection_summary(detections: List[Dict]) -> str:
@@ -105,6 +110,107 @@ def _build_structured_report(
     }
 
 
+def _extract_json_object(text: str) -> Dict[str, Any]:
+    """尽量从模型输出中提取 JSON 对象。
+
+    兼容：
+    - 纯 JSON
+    - ```json ... ``` 代码块
+    - 前后有解释文字但中间包含 { ... }
+    """
+    if not text:
+        raise ValueError("empty llm content")
+
+    cleaned = text.strip()
+    if cleaned.startswith("```"):
+        # 去掉首尾代码块围栏
+        cleaned = cleaned.strip("`")
+        cleaned = cleaned.replace("json\n", "", 1).strip()
+
+    # 直接尝试
+    try:
+        obj = json.loads(cleaned)
+        if isinstance(obj, dict):
+            return obj
+    except Exception:
+        pass
+
+    # 尝试截取第一个 JSON 对象
+    start = cleaned.find("{")
+    end = cleaned.rfind("}")
+    if start == -1 or end == -1 or end <= start:
+        raise ValueError("no json object found")
+
+    snippet = cleaned[start : end + 1]
+    obj = json.loads(snippet)
+    if not isinstance(obj, dict):
+        raise ValueError("llm json is not object")
+    return obj
+
+
+async def _generate_report_llm(
+    modality: str,
+    patient_info: Dict[str, Any],
+    detections: List[Dict[str, Any]],
+) -> Dict[str, str]:
+    """使用 DashScope/Qwen 生成结构化报告（JSON）。"""
+
+    det_summary = _build_detection_summary(detections)
+    exam_type = "超声心动图" if modality == "ultrasound" else "心脏磁共振成像（CMR）"
+    exam_part = "心脏" if modality == "ultrasound" else "心脏及大血管"
+
+    system_prompt = (
+        "你是资深医学影像科医师，负责根据‘检测结果摘要’生成结构化中文医学报告。\n"
+        "请严格输出一个 JSON 对象（不要 Markdown、不要多余解释）。\n"
+        "JSON 必须包含以下字段，值均为中文字符串：\n"
+        "exam_type, exam_part, image_findings, abnormal_findings, preliminary_suggestion, recommendations\n"
+        "写作要求：\n"
+        "- 内容客观、谨慎，避免绝对化诊断；\n"
+        "- 可使用条目符号（如 ‘•’）组织建议；\n"
+        "- 不要编造未提供的检查数据（如 EF、具体序列参数）；\n"
+        "- ‘exam_type’ 固定为给定值，不要改。\n"
+    )
+
+    user_prompt = (
+        f"检查模态: {modality}\n"
+        f"exam_type: {exam_type}\n"
+        f"exam_part: {exam_part}\n"
+        f"患者信息: 姓名={patient_info.get('name','')}, 年龄={patient_info.get('age','')}, 性别={patient_info.get('sex','')}\n"
+        f"检测结果摘要:\n{det_summary}\n"
+        "请生成上述字段的 JSON。"
+    )
+
+    content = await chat_completions(
+        model=settings.dashscope_model,
+        messages=[
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ],
+        temperature=0.3,
+        max_tokens=900,
+    )
+
+    obj = _extract_json_object(content)
+
+    # 基本字段校验与兜底
+    required = [
+        "exam_type",
+        "exam_part",
+        "image_findings",
+        "abnormal_findings",
+        "preliminary_suggestion",
+        "recommendations",
+    ]
+    for key in required:
+        if key not in obj or not isinstance(obj.get(key), str):
+            raise ValueError(f"llm output missing/invalid field: {key}")
+
+    # 强制固定字段，避免模型乱改
+    obj["exam_type"] = exam_type
+    obj["exam_part"] = exam_part
+    return {k: str(obj[k]).strip() for k in required}
+
+
 # ──────────────────────────────────────────────────────────────────────────────
 # 主报告生成接口
 # ──────────────────────────────────────────────────────────────────────────────
@@ -130,9 +236,23 @@ async def generate_report(
     patient_sex = patient_info.get("sex", "未知")
     exam_date = datetime.now().strftime("%Y年%m月%d日")
 
-    logger.info(f"使用固定医学模板生成报告（模态: {modality}）")
-    report_data = _build_structured_report(modality, patient_info, detections)
-    source = "template_rule_based"
+    report_data: Dict[str, str]
+    source: str
+
+    # 优先使用自然语言模型（若配置了 API Key）；失败自动回退到模板
+    if (settings.dashscope_api_key or "").strip():
+        try:
+            logger.info(f"使用 Qwen 生成报告（模态: {modality}，model: {settings.dashscope_model}）")
+            report_data = await _generate_report_llm(modality, patient_info, detections)
+            source = "qwen_llm"
+        except (QwenClientError, ValueError, json.JSONDecodeError) as e:
+            logger.warning(f"LLM 报告生成失败，回退到固定模板: {e}")
+            report_data = _build_structured_report(modality, patient_info, detections)
+            source = "template_rule_based_fallback"
+    else:
+        logger.info(f"未配置 DashScope API Key，使用固定医学模板生成报告（模态: {modality}）")
+        report_data = _build_structured_report(modality, patient_info, detections)
+        source = "template_rule_based"
 
     return {
         "report_data": report_data,
@@ -142,6 +262,7 @@ async def generate_report(
             "modality": modality,
             "detection_count": len(detections),
             "source": source,
+            "llm_model": settings.dashscope_model if source.startswith("qwen") else None,
         },
     }
 

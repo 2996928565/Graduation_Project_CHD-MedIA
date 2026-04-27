@@ -4,6 +4,7 @@
 """
 import base64
 import gc
+import json
 import uuid
 from pathlib import Path
 from typing import Any, Dict, Optional
@@ -97,6 +98,9 @@ class DetectionResponse(BaseModel):
     inference_mode: Optional[str] = None
     processing_time_s: float
     image_size: Dict[str, int]
+    # NIfTI 3D 结果展示（可选）：前端可据此启用逐层浏览
+    nifti_shape: Optional[list] = None
+    nifti_slice_index: Optional[int] = None
 
 
 class DicomPreviewResponse(BaseModel):
@@ -235,6 +239,11 @@ async def detect_image(
         try:
             nifti_volume, nifti_meta = nifti_file_to_array_and_metadata(upload_path)
             dicom_meta = nifti_meta
+            # 默认展示中心切片，便于前端3D逐层浏览从“中间层”开始。
+            try:
+                dicom_meta["slice_index"] = int((nifti_volume.shape[0] // 2) if getattr(nifti_volume, "ndim", 0) == 3 else 0)
+            except Exception:
+                dicom_meta["slice_index"] = 0
             image_bytes = b""
             file_bytes = b""
             logger.info(f"NIfTI 3D 体数据解析成功 | 文件: {filename}")
@@ -331,7 +340,122 @@ async def detect_image(
         inference_mode=result.get("inference_mode"),
         processing_time_s=result["processing_time_s"],
         image_size=result["image_size"],
+        nifti_shape=(dicom_meta or {}).get("nifti_shape") if is_nifti else None,
+        nifti_slice_index=(dicom_meta or {}).get("slice_index") if is_nifti else None,
     )
+
+
+@router.get(
+    "/nifti-slice/{task_id}",
+    summary="获取 NIfTI 3D 指定切片结果（用于前端3D展示）",
+)
+async def get_nifti_slice_result(
+    task_id: str,
+    slice_index: int,
+    confidence_threshold: float = 0.5,
+    db: Session = Depends(get_db),
+    _token: str = Depends(verify_token),
+):
+    """按 task_id 与切片索引返回该层的标注图、分割mask与检测列表（JSON + Base64）。
+
+    说明：
+    - 仅适用于 MRI 模态且上传文件为 NIfTI。
+    - 使用简易文件缓存：同一 task_id + slice_index 再次请求时可避免重复推理。
+    """
+    record = db.query(DetectionRecord).filter(DetectionRecord.task_id == task_id).first()
+    if not record:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"未找到任务 {task_id}",
+        )
+    if record.modality != "mri":
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="仅 MRI 模态支持 NIfTI 逐层展示",
+        )
+
+    meta = record.dicom_metadata or {}
+    if (meta.get("format") or "").lower() != "nifti":
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="该任务不是 NIfTI 格式，无法获取3D切片结果",
+        )
+
+    # 缓存命中则直接返回
+    cache_dir = Path(settings.prediction_dir) / task_id
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    annotated_path = cache_dir / f"slice_{slice_index:04d}_annotated.png"
+    mask_path = cache_dir / f"slice_{slice_index:04d}_mask.png"
+    detections_path = cache_dir / f"slice_{slice_index:04d}_detections.json"
+
+    if annotated_path.exists() and mask_path.exists() and detections_path.exists():
+        annotated_b64 = base64.b64encode(annotated_path.read_bytes()).decode("utf-8")
+        mask_b64 = base64.b64encode(mask_path.read_bytes()).decode("utf-8")
+        detections = json.loads(detections_path.read_text(encoding="utf-8"))
+        return {
+            "task_id": task_id,
+            "modality": "mri",
+            "slice_index": slice_index,
+            "volume_depth": int((meta.get("nifti_shape") or [0])[0] or 0),
+            "image_size": {"width": int(record.image_width or 0), "height": int(record.image_height or 0)},
+            "processing_time_s": 0.0,
+            "detections": detections,
+            "annotated_image_base64": annotated_b64,
+            "segmentation_mask_base64": mask_b64,
+            "inference_mode": "cache",
+        }
+
+    upload_path = record.upload_path
+    if not upload_path or not Path(upload_path).exists():
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="原始 NIfTI 文件不存在，无法生成切片结果",
+        )
+
+    try:
+        volume_arr, nifti_meta = nifti_file_to_array_and_metadata(upload_path)
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"NIfTI 文件解析失败: {e}",
+        )
+
+    try:
+        detector = get_mri_detector()
+        result = detector.detect_nifti_slice(
+            volume_arr,
+            slice_index=int(slice_index),
+            confidence_threshold=float(confidence_threshold),
+        )
+    except Exception as e:
+        logger.error(f"NIfTI 切片推理失败 | task_id={task_id} | slice={slice_index} | {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"NIfTI 切片推理失败: {e}",
+        )
+
+    annotated_bytes = result["annotated_image_bytes"]
+    mask_bytes = result.get("segmentation_mask_bytes") or b""
+
+    annotated_path.write_bytes(annotated_bytes)
+    mask_path.write_bytes(mask_bytes)
+    detections_path.write_text(
+        json.dumps(result.get("detections", []), ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    return {
+        "task_id": task_id,
+        "modality": "mri",
+        "slice_index": int(slice_index),
+        "volume_depth": int((nifti_meta.get("nifti_shape") or [0])[0] or 0),
+        "image_size": result.get("image_size"),
+        "processing_time_s": float(result.get("processing_time_s", 0.0)),
+        "detections": result.get("detections", []),
+        "annotated_image_base64": base64.b64encode(annotated_bytes).decode("utf-8"),
+        "segmentation_mask_base64": base64.b64encode(mask_bytes).decode("utf-8") if mask_bytes else None,
+        "inference_mode": result.get("inference_mode"),
+    }
 
 
 @router.get(

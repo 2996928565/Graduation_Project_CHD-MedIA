@@ -77,7 +77,7 @@ class UNet3D(nn.Module):
         """
         Args:
             in_channels: 输入通道数（1表示灰度图）
-            num_classes: 分割类别数（MM-WHS: 8类包含背景）
+            num_classes: 分割类别数（lll: 8类包含背景）
             base_channels: 基础通道数（控制模型大小，推荐16-32）
         """
         super().__init__()

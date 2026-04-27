@@ -122,9 +122,11 @@ import { ref, reactive, computed, onMounted } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { createPatient, getPatient, updatePatient } from '@/api/patients.js'
+import { useAuthStore } from '@/store/auth.js'
 
 const router = useRouter()
 const route = useRoute()
+const authStore = useAuthStore()
 const formRef = ref(null)
 const loading = ref(false)
 const fetchLoading = ref(false)
@@ -139,7 +141,7 @@ const form = reactive({
   id_number: '',
   referring_doctor: '',
   department: '医学影像科',
-  exam_modality: 'ultrasound',
+  exam_modality: 'mri',
   chd_risk_factors: [],
   chief_complaint: '',
   medical_history: '',
@@ -175,6 +177,10 @@ onMounted(async () => {
       router.push('/patients')
     } finally {
       fetchLoading.value = false
+    }
+  } else {
+    if (!form.referring_doctor) {
+      form.referring_doctor = authStore.fullName || authStore.username || ''
     }
   }
 })
