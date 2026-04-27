@@ -31,6 +31,10 @@
           <el-icon><PictureFilled /></el-icon>
           <template #title>影像检测</template>
         </el-menu-item>
+        <el-menu-item index="/history">
+          <el-icon><List /></el-icon>
+          <template #title>检测历史</template>
+        </el-menu-item>
         <el-menu-item index="/report">
           <el-icon><Document /></el-icon>
           <template #title>报告生成</template>

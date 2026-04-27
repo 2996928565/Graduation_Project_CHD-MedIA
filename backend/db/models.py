@@ -52,6 +52,7 @@ class DetectionRecord(Base):
     id = Column(Integer, primary_key=True, autoincrement=True)
     task_id = Column(String(64), unique=True, nullable=False, index=True, comment="检测任务ID")
     patient_id = Column(String(36), nullable=True, index=True, comment="患者ID")
+    created_by_doctor = Column(String(100), nullable=True, index=True, comment="检测医生姓名")
     modality = Column(String(20), nullable=False, comment="检查模态")
     filename = Column(String(255), nullable=False, comment="原始文件名")
     file_size_kb = Column(Float, nullable=False, default=0, comment="文件大小KB")

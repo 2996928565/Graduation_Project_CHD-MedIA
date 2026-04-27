@@ -48,3 +48,16 @@ export function getNiftiSlice(taskId, sliceIndex, confidenceThreshold = 0.5) {
     timeout: 300000,
   })
 }
+
+/**
+ * 获取检测历史记录
+ * @param {Object} params
+ * @param {number} params.page
+ * @param {number} params.page_size
+ * @param {string} params.patient_name
+ * @param {string} params.doctor_name
+ * @param {string} params.modality
+ */
+export function getDetectionHistory(params = {}) {
+  return request.get('/images/history', { params })
+}

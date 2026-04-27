@@ -48,6 +48,12 @@ const routes = [
         meta: { title: '影像检测' },
       },
       {
+        path: 'history',
+        name: 'DetectionHistory',
+        component: () => import('@/views/DetectionHistory.vue'),
+        meta: { title: '检测历史' },
+      },
+      {
         path: 'report',
         name: 'ReportView',
         component: () => import('@/views/ReportView.vue'),

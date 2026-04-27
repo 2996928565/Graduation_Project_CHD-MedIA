@@ -9,17 +9,17 @@ import uuid
 from pathlib import Path
 from typing import Any, Dict, Optional
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
+from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status, Query
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
-from api.auth import verify_token
+from api.auth import verify_token, get_current_user
 from config.settings import settings
 from core.ultrasound import get_ultrasound_detector
 from core.mri import get_mri_detector
 from db.database import get_db
-from db.models import DetectionRecord
+from db.models import DetectionRecord, User, Patient
 from utils.dicom_parser import load_dicom, extract_metadata, dicom_to_png_bytes
 from utils.nifti_parser import (
     nifti_bytes_to_png_and_metadata,
@@ -81,6 +81,14 @@ def _save_prediction(file_bytes: bytes, filename: str) -> str:
     return str(save_path)
 
 
+def _is_admin(user: User) -> bool:
+    return (user.role or "").lower() == "admin"
+
+
+def _doctor_label(user: User) -> str:
+    return ((user.full_name or "").strip() or (user.username or "").strip())
+
+
 # ── 响应模型 ──────────────────────────────────────────────────────────────────
 
 class DetectionResponse(BaseModel):
@@ -108,6 +116,25 @@ class DicomPreviewResponse(BaseModel):
     filename: str
     metadata: Dict[str, Any]
     preview_image_base64: str
+
+
+class DetectionHistoryItem(BaseModel):
+    task_id: str
+    patient_id: Optional[str] = None
+    patient_name: Optional[str] = None
+    doctor_name: str
+    modality: str
+    filename: str
+    detections_count: int
+    processing_time_s: float
+    created_at: str
+
+
+class DetectionHistoryResponse(BaseModel):
+    total: int
+    page: int
+    page_size: int
+    items: list[DetectionHistoryItem]
 
 
 # ── API 路由 ──────────────────────────────────────────────────────────────────
@@ -195,7 +222,7 @@ async def detect_image(
     ),
     patient_id: Optional[str] = Form(default=None, description="患者 ID（可选）"),
     db: Session = Depends(get_db),
-    _token: str = Depends(verify_token),
+    current_user: User = Depends(get_current_user),
 ) -> DetectionResponse:
     """
     对上传的超声或 MRI 影像执行异常检测。
@@ -299,6 +326,7 @@ async def detect_image(
     record = DetectionRecord(
         task_id=task_id,
         patient_id=patient_id,
+        created_by_doctor=_doctor_label(current_user),
         modality=modality,
         filename=filename,
         file_size_kb=file_size_kb,
@@ -342,6 +370,70 @@ async def detect_image(
         image_size=result["image_size"],
         nifti_shape=(dicom_meta or {}).get("nifti_shape") if is_nifti else None,
         nifti_slice_index=(dicom_meta or {}).get("slice_index") if is_nifti else None,
+    )
+
+
+@router.get(
+    "/history",
+    response_model=DetectionHistoryResponse,
+    summary="获取检测历史记录",
+)
+def get_detection_history(
+    page: int = Query(default=1, ge=1, description="页码，从 1 开始"),
+    page_size: int = Query(default=20, ge=1, le=100, description="每页条数"),
+    patient_name: Optional[str] = Query(default=None, description="患者姓名模糊搜索"),
+    doctor_name: Optional[str] = Query(default=None, description="医生姓名模糊搜索（仅管理员可用）"),
+    modality: Optional[str] = Query(default=None, description="模态过滤：ultrasound/mri"),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> DetectionHistoryResponse:
+    query = (
+        db.query(DetectionRecord, Patient.name.label("patient_name"))
+        .outerjoin(Patient, DetectionRecord.patient_id == Patient.id)
+    )
+
+    if not _is_admin(current_user):
+        query = query.filter(DetectionRecord.created_by_doctor == _doctor_label(current_user))
+
+    if patient_name and patient_name.strip():
+        query = query.filter(Patient.name.like(f"%{patient_name.strip()}%"))
+
+    if modality and modality.strip() in {"ultrasound", "mri"}:
+        query = query.filter(DetectionRecord.modality == modality.strip())
+
+    if _is_admin(current_user) and doctor_name and doctor_name.strip():
+        query = query.filter(DetectionRecord.created_by_doctor.like(f"%{doctor_name.strip()}%"))
+
+    total = query.count()
+    rows = (
+        query.order_by(DetectionRecord.created_at.desc())
+        .offset((page - 1) * page_size)
+        .limit(page_size)
+        .all()
+    )
+
+    items = []
+    for record, patient_name_val in rows:
+        detections = record.detections or []
+        items.append(
+            DetectionHistoryItem(
+                task_id=record.task_id,
+                patient_id=record.patient_id,
+                patient_name=patient_name_val,
+                doctor_name=record.created_by_doctor or "",
+                modality=record.modality,
+                filename=record.filename,
+                detections_count=len(detections),
+                processing_time_s=float(record.processing_time_s or 0.0),
+                created_at=record.created_at.isoformat() if record.created_at else "",
+            )
+        )
+
+    return DetectionHistoryResponse(
+        total=total,
+        page=page,
+        page_size=page_size,
+        items=items,
     )
 
 

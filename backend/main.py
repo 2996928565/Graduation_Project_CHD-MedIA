@@ -23,6 +23,7 @@ from db.database import engine, get_db
 from db.models import User, Patient  # noqa: F401 — 确保建表时模型已注册
 import db.database as _db_module
 from sqlalchemy.orm import Session
+from sqlalchemy import inspect, text
 from loguru import logger
 
 
@@ -269,6 +270,15 @@ async def startup_event():
 
     # 建表（若表不存在则自动创建）
     _db_module.Base.metadata.create_all(bind=engine)
+
+    # 兼容历史数据库：补充新增字段（无迁移工具时的轻量兜底）
+    inspector = inspect(engine)
+    detection_cols = {col["name"] for col in inspector.get_columns("detection_records")}
+    if "created_by_doctor" not in detection_cols:
+        with engine.begin() as conn:
+            conn.execute(text("ALTER TABLE detection_records ADD COLUMN created_by_doctor VARCHAR(100) NULL COMMENT '检测医生姓名'"))
+        logger.info("已为 detection_records 补充 created_by_doctor 字段")
+
     logger.info("数据库表结构已同步")
 
     # 初始化管理员账号
