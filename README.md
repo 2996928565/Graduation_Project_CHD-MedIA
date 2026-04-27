@@ -112,7 +112,7 @@ source .venv/bin/activate        # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
 uvicorn main:app --host 0.0.0.0 --port 8000 --reload
 ```
-
+启动minio： 进入minio的bin文件夹输入命令   minio.exe server E:\minio\data --console-address ":9001"
 **前端**：
 ```bash
 cd frontend
