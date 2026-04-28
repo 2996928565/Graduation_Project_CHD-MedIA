@@ -35,6 +35,10 @@
           <el-icon><List /></el-icon>
           <template #title>检测历史</template>
         </el-menu-item>
+        <el-menu-item index="/assistant">
+          <el-icon><ChatDotRound /></el-icon>
+          <template #title>智能问答助手</template>
+        </el-menu-item>
         <el-menu-item index="/report">
           <el-icon><Document /></el-icon>
           <template #title>报告生成</template>

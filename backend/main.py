@@ -19,6 +19,7 @@ from api.auth import authenticate_user, create_access_token, init_admin, hash_pa
 from api.patients import router as patients_router
 from api.images import router as images_router
 from api.reports import router as reports_router
+from api.assistant import router as assistant_router
 from db.database import engine, get_db
 from db.models import User, Patient  # noqa: F401 — 确保建表时模型已注册
 import db.database as _db_module
@@ -64,6 +65,7 @@ app.add_middleware(
 app.include_router(patients_router, prefix="/api/v1")
 app.include_router(images_router, prefix="/api/v1")
 app.include_router(reports_router, prefix="/api/v1")
+app.include_router(assistant_router, prefix="/api/v1")
 
 
 # ── 认证接口 ──────────────────────────────────────────────────────────────────

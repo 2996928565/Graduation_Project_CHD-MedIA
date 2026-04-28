@@ -54,6 +54,12 @@ const routes = [
         meta: { title: '检测历史' },
       },
       {
+        path: 'assistant',
+        name: 'AiAssistant',
+        component: () => import('@/views/AiAssistant.vue'),
+        meta: { title: '智能问答助手' },
+      },
+      {
         path: 'report',
         name: 'ReportView',
         component: () => import('@/views/ReportView.vue'),
