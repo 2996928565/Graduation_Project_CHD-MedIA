@@ -38,6 +38,10 @@ def discover_label_files(data_dir: Path, modality: str) -> List[Path]:
     return files
 
 
+def discover_prediction_files(pred_dir: Path, pred_glob: str) -> List[Path]:
+    return sorted(list(pred_dir.glob(pred_glob)))
+
+
 def load_normal_case_filter(path: str | None) -> List[str]:
     if not path:
         return []
@@ -57,6 +61,9 @@ def main():
     parser.add_argument("--data_dir", type=str, default=r"E:\BaiduNetdiskDownload", help="MMWHS 数据根目录")
     parser.add_argument("--modality", type=str, default="mr", choices=["mr", "ct"], help="模态")
     parser.add_argument("--normal_list", type=str, default="", help="正常样本筛选文件（每行一个case关键字，可选）")
+    parser.add_argument("--pred_dir", type=str, default="", help="可选：直接使用预测标签目录训练（*_prediction.nii.gz）")
+    parser.add_argument("--pred_glob", type=str, default="*_prediction.nii.gz", help="预测标签匹配模式")
+    parser.add_argument("--pred_is_raw_mmwhs", action="store_true", help="预测标签若仍是MMWHS原始值(500/600等)则启用重映射")
     parser.add_argument(
         "--output_model",
         type=str,
@@ -68,17 +75,29 @@ def main():
     parser.add_argument("--min_abnormal_features", type=int, default=2, help="判为异常的最少超阈特征数")
 
     args = parser.parse_args()
-    data_dir = Path(args.data_dir)
-    label_files = discover_label_files(data_dir, modality=args.modality)
-    if not label_files:
-        raise FileNotFoundError(f"未找到标签文件，请检查目录: {data_dir}")
+    use_pred = bool(args.pred_dir.strip())
+    if use_pred:
+        pred_dir = Path(args.pred_dir)
+        if not pred_dir.exists():
+            raise FileNotFoundError(f"预测标签目录不存在: {pred_dir}")
+        label_files = discover_prediction_files(pred_dir, args.pred_glob)
+        if not label_files:
+            raise FileNotFoundError(
+                f"未找到预测标签文件，请检查目录与模式: {pred_dir} | {args.pred_glob}"
+            )
+    else:
+        data_dir = Path(args.data_dir)
+        label_files = discover_label_files(data_dir, modality=args.modality)
+        if not label_files:
+            raise FileNotFoundError(f"未找到标签文件，请检查目录: {data_dir}")
 
     normal_filter = load_normal_case_filter(args.normal_list)
     selected = [p for p in label_files if is_selected_case(p, normal_filter)]
     if len(selected) == 0:
         raise RuntimeError("筛选后正常样本为空，请检查 --normal_list。")
 
-    print(f"发现标签总数: {len(label_files)}")
+    source_text = "预测标签" if use_pred else "真值标签"
+    print(f"发现{source_text}总数: {len(label_files)}")
     print(f"用于训练正常模型样本数: {len(selected)}")
 
     feature_rows = []
@@ -86,7 +105,8 @@ def main():
     for idx, lbl_path in enumerate(selected, start=1):
         lbl_img = sitk.ReadImage(str(lbl_path))
         lbl_arr = sitk.GetArrayFromImage(lbl_img).astype(np.int32)
-        lbl_arr = remap_labels(lbl_arr)
+        if (not use_pred) or args.pred_is_raw_mmwhs:
+            lbl_arr = remap_labels(lbl_arr)
         spacing_xyz = tuple(float(v) for v in lbl_img.GetSpacing())
 
         feat = extract_case_features(lbl_arr, spacing_xyz=spacing_xyz)
@@ -114,6 +134,9 @@ def main():
     output_model_path = Path(args.output_model)
     summary_path = output_model_path.with_suffix(".train_summary.json")
     summary_payload = {
+        "source": "prediction_labels" if use_pred else "ground_truth_labels",
+        "pred_dir": args.pred_dir if use_pred else "",
+        "pred_glob": args.pred_glob if use_pred else "",
         "num_cases": len(selected),
         "score_quantile": float(args.score_quantile),
         "feature_z_threshold": float(args.feature_z_threshold),

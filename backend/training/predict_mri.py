@@ -12,6 +12,7 @@ import numpy as np
 import SimpleITK as sitk
 import matplotlib.pyplot as plt
 from tqdm import tqdm
+import torch.nn.functional as F
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
@@ -20,7 +21,74 @@ from training.dataset import normalize_intensity, MMWHS_CLASS_NAMES
 from training.normal_heart_model import extract_case_features, load_normal_heart_model
 
 
-def predict_single_image(model, image_path, device, output_dir, normal_model=None):
+def predict_full_volume_sliding(
+    model,
+    image: np.ndarray,
+    device,
+    patch_size=(64, 128, 128),
+    stride=(32, 64, 64),
+):
+    """滑窗预测完整3D体积，避免整幅前向导致显存溢出"""
+    model.eval()
+    d, h, w = image.shape
+    pd, ph, pw = patch_size
+    sd, sh, sw = stride
+
+    num_classes = 8
+    prob_sum = np.zeros((num_classes, d, h, w), dtype=np.float32)
+    count_map = np.zeros((d, h, w), dtype=np.float32)
+
+    def _starts(size, patch, step):
+        if size <= patch:
+            return [0]
+        starts = list(range(0, size - patch + 1, step))
+        tail = size - patch
+        if starts[-1] != tail:
+            starts.append(tail)
+        return starts
+
+    d_starts = _starts(d, pd, sd)
+    h_starts = _starts(h, ph, sh)
+    w_starts = _starts(w, pw, sw)
+
+    total_patches = len(d_starts) * len(h_starts) * len(w_starts)
+    with torch.no_grad():
+        with tqdm(total=total_patches, desc="Predicting patches") as pbar:
+            for ds in d_starts:
+                de = min(ds + pd, d)
+                ds = de - pd
+                for hs in h_starts:
+                    he = min(hs + ph, h)
+                    hs = he - ph
+                    for ws in w_starts:
+                        we = min(ws + pw, w)
+                        ws = we - pw
+
+                        patch = image[ds:de, hs:he, ws:we]
+                        patch_t = torch.from_numpy(patch).unsqueeze(0).unsqueeze(0).float().to(device)
+                        logits = model(patch_t)
+                        probs = F.softmax(logits, dim=1).squeeze(0).cpu().numpy()
+
+                        prob_sum[:, ds:de, hs:he, ws:we] += probs
+                        count_map[ds:de, hs:he, ws:we] += 1.0
+                        pbar.update(1)
+
+    count_map = np.maximum(count_map, 1.0)
+    prob_avg = prob_sum / count_map[np.newaxis, ...]
+    prediction = np.argmax(prob_avg, axis=0).astype(np.uint8)
+    return prediction
+
+
+def predict_single_image(
+    model,
+    image_path,
+    device,
+    output_dir,
+    normal_model=None,
+    labels_only=False,
+    patch_size=(64, 128, 128),
+    stride=(32, 64, 64),
+):
     """预测单个图像（无需标签）"""
     model.eval()
     
@@ -39,10 +107,14 @@ def predict_single_image(model, image_path, device, output_dir, normal_model=Non
     # 转为tensor
     img_tensor = torch.from_numpy(img_arr).unsqueeze(0).unsqueeze(0).float().to(device)
     
-    print("开始预测...")
-    with torch.no_grad():
-        output = model(img_tensor)
-        prediction = torch.argmax(output, dim=1).squeeze(0).cpu().numpy()
+    print("开始预测（滑窗3D）...")
+    prediction = predict_full_volume_sliding(
+        model=model,
+        image=img_arr,
+        device=device,
+        patch_size=tuple(patch_size),
+        stride=tuple(stride),
+    )
     
     # 统计预测结果
     print("\n预测统计:")
@@ -65,7 +137,7 @@ def predict_single_image(model, image_path, device, output_dir, normal_model=Non
     print(f"\n✓ 预测结果已保存: {pred_path}")
 
     normality_result = None
-    if normal_model is not None:
+    if (normal_model is not None) and (not labels_only):
         spacing_xyz = tuple(float(v) for v in img_sitk.GetSpacing())
         features = extract_case_features(prediction, spacing_xyz=spacing_xyz)
         normality_result = normal_model.evaluate_features(features)
@@ -86,6 +158,9 @@ def predict_single_image(model, image_path, device, output_dir, normal_model=Non
         )
         print(f"✓ 常模判别结果已保存: {normality_json_path}")
     
+    if labels_only:
+        return prediction, normality_result
+
     # 可视化多个切片
     vis_dir = output_dir / "visualizations"
     vis_dir.mkdir(exist_ok=True)
@@ -122,7 +197,17 @@ def predict_single_image(model, image_path, device, output_dir, normal_model=Non
     return prediction, normality_result
 
 
-def predict_batch(model, data_dir, modality, device, output_dir, normal_model=None):
+def predict_batch(
+    model,
+    data_dir,
+    modality,
+    device,
+    output_dir,
+    normal_model=None,
+    labels_only=False,
+    patch_size=(64, 128, 128),
+    stride=(32, 64, 64),
+):
     """批量预测（无需标签）"""
     model.eval()
     
@@ -154,14 +239,33 @@ def predict_batch(model, data_dir, modality, device, output_dir, normal_model=No
     # 预测每个样本
     for idx, image_file in enumerate(test_files):
         print(f"\n[{idx+1}/{len(test_files)}] {'='*50}")
-        predict_single_image(model, str(image_file), device, output_dir, normal_model=normal_model)
+        predict_single_image(
+            model,
+            str(image_file),
+            device,
+            output_dir,
+            normal_model=normal_model,
+            labels_only=labels_only,
+            patch_size=patch_size,
+            stride=stride,
+        )
     
     print(f"\n{'='*60}")
     print(f"✓ 所有预测完成！结果保存在: {output_dir}")
     print(f"{'='*60}")
 
 
-def predict_batch_by_glob(model, glob_root, input_glob, device, output_dir, normal_model=None):
+def predict_batch_by_glob(
+    model,
+    glob_root,
+    input_glob,
+    device,
+    output_dir,
+    normal_model=None,
+    labels_only=False,
+    patch_size=(64, 128, 128),
+    stride=(32, 64, 64),
+):
     """按自定义 glob 模式批量预测"""
     model.eval()
 
@@ -186,7 +290,16 @@ def predict_batch_by_glob(model, glob_root, input_glob, device, output_dir, norm
 
     for idx, image_file in enumerate(test_files):
         print(f"\n[{idx+1}/{len(test_files)}] {'='*50}")
-        predict_single_image(model, str(image_file), device, output_dir, normal_model=normal_model)
+        predict_single_image(
+            model,
+            str(image_file),
+            device,
+            output_dir,
+            normal_model=normal_model,
+            labels_only=labels_only,
+            patch_size=patch_size,
+            stride=stride,
+        )
 
     print(f"\n{'='*60}")
     print(f"✓ 所有预测完成！结果保存在: {output_dir}")
@@ -219,6 +332,12 @@ def main():
                         help="自定义glob的搜索根目录（仅 --input_glob 生效）")
     parser.add_argument("--device", type=str, default="cuda",
                         help="计算设备")
+    parser.add_argument("--patch_size", type=int, nargs=3, default=[64, 128, 128],
+                        help="滑窗patch大小 D H W")
+    parser.add_argument("--stride", type=int, nargs=3, default=[32, 64, 64],
+                        help="滑窗步长 D H W")
+    parser.add_argument("--labels_only", action="store_true",
+                        help="仅保存分割标签，不生成可视化和常模结果")
     parser.add_argument("--normal_model", type=str, default="",
                         help="可选：常模模型json路径，提供后会进行第二模型判别")
     
@@ -249,13 +368,15 @@ def main():
     
     # 常模模型（可选）
     normal_model = None
-    if args.normal_model:
+    if args.normal_model and (not args.labels_only):
         normal_path = Path(args.normal_model)
         if not normal_path.exists():
             print(f"错误: 常模模型不存在: {normal_path}")
             return
         normal_model = load_normal_heart_model(normal_path)
         print(f"常模模型加载成功: {normal_path}")
+    elif args.normal_model and args.labels_only:
+        print("labels_only 已启用，跳过常模模型判别。")
 
     # 预测
     if args.image:
@@ -265,7 +386,14 @@ def main():
             return
         
         _prediction, _normality = predict_single_image(
-            model, args.image, device, args.output_dir, normal_model=normal_model
+            model,
+            args.image,
+            device,
+            args.output_dir,
+            normal_model=normal_model,
+            labels_only=args.labels_only,
+            patch_size=tuple(args.patch_size),
+            stride=tuple(args.stride),
         )
     elif args.input_glob:
         # 自定义glob批量预测
@@ -276,10 +404,23 @@ def main():
             device=device,
             output_dir=args.output_dir,
             normal_model=normal_model,
+            labels_only=args.labels_only,
+            patch_size=tuple(args.patch_size),
+            stride=tuple(args.stride),
         )
     else:
         # 批量预测
-        predict_batch(model, args.data_dir, args.modality, device, args.output_dir, normal_model=normal_model)
+        predict_batch(
+            model,
+            args.data_dir,
+            args.modality,
+            device,
+            args.output_dir,
+            normal_model=normal_model,
+            labels_only=args.labels_only,
+            patch_size=tuple(args.patch_size),
+            stride=tuple(args.stride),
+        )
     
     print(f"\n✓ 完成！结果保存在: {args.output_dir}")
 

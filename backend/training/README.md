@@ -96,6 +96,39 @@ python backend/training/train_normal_heart_model.py \
 - 输入是正常样本分割标签（建议 MMWHS 正常样本）。
 - 输出 `mri_normal_heart_model.json`，用于后续是否患病判别。
 
+### 用预测标签训练第二模型（推荐你的当前流程）
+```bash
+python backend/training/train_normal_heart_model.py \
+    --pred_dir backend/training/predictions_train \
+    --pred_glob "*_prediction.nii.gz" \
+    --normal_list /root/autodl-tmp/normal_list.txt \
+    --output_model backend/models/mri_normal_heart_model.json
+```
+- `--pred_dir` 启用后，将直接读取预测标签，不再读取 `*_label.nii.gz` 真值标签。
+- 预测标签默认应为 0~7 类别编码；若你的预测文件是 MMWHS 原始标签值，可加 `--pred_is_raw_mmwhs`。
+
+### 训练 MLP 常模模型（输出 .pth）
+```bash
+python backend/training/train_normal_heart_mlp.py \
+    --pred_dir backend/training/predictions_train \
+    --pred_glob "*_prediction.nii.gz" \
+    --normal_list /root/autodl-tmp/normal_list.txt \
+    --hidden_dims 64 32 \
+    --latent_dim 8 \
+    --epochs 300 \
+    --output_model backend/models/mri_normal_heart_mlp.pth
+```
+- 该脚本训练 AutoEncoder 常模模型，输出 `.pth`（包含网络权重、标准化参数、异常阈值）。
+
+### MLP 常模模型推理
+```bash
+python backend/training/predict_normality_mlp.py \
+    --model_path backend/models/mri_normal_heart_mlp.pth \
+    --seg_dir backend/training/predictions_train \
+    --seg_glob "*_prediction.nii.gz" \
+    --output_json backend/training/predictions_train/normality_mlp.json
+```
+
 ### 双模型串联推理（分割模型 + 常模模型）
 ```bash
 python backend/training/predict_mri.py \
