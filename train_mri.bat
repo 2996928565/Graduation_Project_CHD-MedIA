@@ -39,8 +39,9 @@ python backend\training\train_mri.py ^
     --batch_size 1 ^
     --base_channels 16 ^
     --epochs 200 ^
-    --lr 0.001 ^
+    --lr 0.0005 ^
     --num_workers 4 ^
+    --norm instance ^
     --device cuda
 
 if %errorlevel% neq 0 (

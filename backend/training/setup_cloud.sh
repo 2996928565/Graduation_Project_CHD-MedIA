@@ -105,10 +105,10 @@ python backend/training/train_mri.py \
     --batch_size 2 \
     --base_channels 32 \
     --epochs 200 \
-    --lr 0.001 \
+    --lr 0.0005 \
     --num_workers 8 \
+    --norm instance \
     --device cuda
-
 echo "训练完成！按任意键退出..."
 read
 EOF

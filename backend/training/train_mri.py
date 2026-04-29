@@ -17,8 +17,9 @@ from tqdm import tqdm
 # 添加项目根目录到path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from training.dataset import get_dataloaders, MMWHS_CLASS_NAMES
+from training.dataset import get_dataloaders, MMWHS_CLASS_NAMES, remap_labels
 from training.model import get_model, CombinedLoss
+import SimpleITK as sitk
 
 
 def dice_coefficient(pred: torch.Tensor, target: torch.Tensor, num_classes: int) -> dict:
@@ -50,6 +51,25 @@ def dice_coefficient(pred: torch.Tensor, target: torch.Tensor, num_classes: int)
         dice_scores[MMWHS_CLASS_NAMES[cls_idx]] = dice
     
     return dice_scores
+
+
+def compute_class_weights(label_files: list[str], num_classes: int) -> np.ndarray:
+    """基于训练集标签频率计算类权重（用于缓解类不平衡）"""
+    counts = np.zeros(num_classes, dtype=np.float64)
+    for lbl_path in label_files:
+        lbl_sitk = sitk.ReadImage(str(lbl_path))
+        lbl_arr = sitk.GetArrayFromImage(lbl_sitk).astype(np.int32)
+        lbl_arr = remap_labels(lbl_arr)
+        for cls_idx in range(num_classes):
+            counts[cls_idx] += np.sum(lbl_arr == cls_idx)
+
+    counts = np.maximum(counts, 1.0)
+    freqs = counts / counts.sum()
+    median_freq = np.median(freqs)
+    weights = median_freq / freqs
+    weights = np.clip(weights, 0.1, 10.0)
+    weights = weights / weights.sum() * num_classes
+    return weights.astype(np.float32)
 
 
 def train_epoch(model, loader, criterion, optimizer, device, epoch):
@@ -141,14 +161,33 @@ def train(args):
     
     # 模型
     print("\n=== 创建模型 ===")
-    model = get_model(num_classes=args.num_classes, base_channels=args.base_channels)
+    model = get_model(
+        num_classes=args.num_classes,
+        base_channels=args.base_channels,
+        norm_type=args.norm,
+    )
     model = model.to(device)
     
     total_params = sum(p.numel() for p in model.parameters())
     print(f"模型参数量: {total_params:,} ({total_params / 1e6:.2f}M)")
     
     # 损失函数和优化器
-    criterion = CombinedLoss(ce_weight=0.5, dice_weight=0.5)
+    ce_weights_tensor = None
+    if not args.no_class_weights:
+        print("\n=== 计算类别权重 ===")
+        label_files = train_loader.dataset.label_files
+        class_weights = compute_class_weights(label_files, args.num_classes)
+        ce_weights_tensor = torch.tensor(class_weights, dtype=torch.float32, device=device)
+        print("类别权重:")
+        for idx, w in enumerate(class_weights):
+            name = MMWHS_CLASS_NAMES[idx] if idx < len(MMWHS_CLASS_NAMES) else f"class_{idx}"
+            print(f"  {name:<20s}: {w:.3f}")
+
+    criterion = CombinedLoss(
+        ce_weight=0.5,
+        dice_weight=0.5,
+        ce_class_weights=ce_weights_tensor,
+    )
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=1e-5)
     
     # 学习率调度
@@ -244,6 +283,9 @@ def main():
                         help="类别数（MM-WHS: 8包含背景）")
     parser.add_argument("--base_channels", type=int, default=16,
                         help="基础通道数（16适合12GB显存，32适合24GB显存）")
+    parser.add_argument("--norm", type=str, default="instance",
+                        choices=["instance", "group", "batch"],
+                        help="归一化方式（小batch建议instance/group）")
     
     # 训练
     parser.add_argument("--epochs", type=int, default=200,
@@ -254,6 +296,8 @@ def main():
                         help="学习率")
     parser.add_argument("--num_workers", type=int, default=4,
                         help="数据加载线程数")
+    parser.add_argument("--no_class_weights", action="store_true",
+                        help="禁用类别权重（默认启用）")
     
     # 保存
     parser.add_argument("--save_dir", type=str, default="backend/training/checkpoints",

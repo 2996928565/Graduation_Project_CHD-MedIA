@@ -72,18 +72,43 @@ def _center_crop_or_pad(image: np.ndarray, target_size: Tuple[int, int, int]) ->
     return result
 
 
-def random_crop_3d(image: np.ndarray, label: np.ndarray, crop_size: Tuple[int, int, int]) -> Tuple[np.ndarray, np.ndarray]:
-    """随机裁剪3D patch"""
+def _center_crop_or_pad_pair(
+    image: np.ndarray,
+    label: np.ndarray,
+    target_size: Tuple[int, int, int],
+) -> Tuple[np.ndarray, np.ndarray]:
+    image_c = _center_crop_or_pad(image, target_size)
+    label_c = _center_crop_or_pad(label, target_size)
+    return image_c, label_c
+
+
+def random_crop_3d(
+    image: np.ndarray,
+    label: np.ndarray,
+    crop_size: Tuple[int, int, int],
+    foreground_prob: float = 0.0,
+    max_tries: int = 10,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """随机裁剪3D patch（可选前景引导）"""
     d, h, w = image.shape
     cd, ch, cw = crop_size
     
     # 确保裁剪大小不超过图像大小
     cd, ch, cw = min(cd, d), min(ch, h), min(cw, w)
     
-    # 随机起始点
+    # 随机起始点（优先选择前景区域）
     z = random.randint(0, max(0, d - cd))
     y = random.randint(0, max(0, h - ch))
     x = random.randint(0, max(0, w - cw))
+    if foreground_prob > 0 and random.random() < foreground_prob:
+        fg = np.argwhere(label > 0)
+        if fg.size > 0:
+            for _ in range(max_tries):
+                cz, cy, cx = fg[random.randint(0, len(fg) - 1)]
+                z = max(0, min(cz - cd // 2, d - cd))
+                y = max(0, min(cy - ch // 2, h - ch))
+                x = max(0, min(cx - cw // 2, w - cw))
+                break
     
     image_crop = image[z:z+cd, y:y+ch, x:x+cw]
     label_crop = label[z:z+cd, y:y+ch, x:x+cw]
@@ -176,6 +201,8 @@ class MMWHSDataset(Dataset):
         crop_size: Tuple[int, int, int] = (64, 128, 128),
         augment: bool = True,
         train_ratio: float = 0.8,
+        crop_mode: str = "random",
+        foreground_prob: float = 0.0,
     ):
         """
         Args:
@@ -194,6 +221,8 @@ class MMWHSDataset(Dataset):
         self.crop_size = crop_size
         self.has_labels = (split != "test")  # test split 无标注
         self.augment = augment and (split == "train")
+        self.crop_mode = crop_mode
+        self.foreground_prob = foreground_prob
         
         if split == "test":
             # ---------- test split：从 {modality}_test/ 加载，无标注 ----------
@@ -274,7 +303,17 @@ class MMWHSDataset(Dataset):
             lbl_arr = remap_labels(lbl_arr)
             
             # 提取patch
-            img_patch, lbl_patch = random_crop_3d(img_arr, lbl_arr, self.crop_size)
+            if self.crop_mode == "center":
+                img_patch, lbl_patch = _center_crop_or_pad_pair(
+                    img_arr, lbl_arr, self.crop_size
+                )
+            else:
+                img_patch, lbl_patch = random_crop_3d(
+                    img_arr,
+                    lbl_arr,
+                    self.crop_size,
+                    foreground_prob=self.foreground_prob,
+                )
             
             # 数据增强
             if self.augment:
@@ -322,6 +361,8 @@ def get_dataloaders(
         crop_size=crop_size,
         augment=True,
         train_ratio=train_ratio,
+        crop_mode="random",
+        foreground_prob=0.7,
     )
     
     val_dataset = MMWHSDataset(
@@ -331,6 +372,8 @@ def get_dataloaders(
         crop_size=crop_size,
         augment=False,
         train_ratio=train_ratio,
+        crop_mode="center",
+        foreground_prob=0.0,
     )
     
     train_loader = torch.utils.data.DataLoader(

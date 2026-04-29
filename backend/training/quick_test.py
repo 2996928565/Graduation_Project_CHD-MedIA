@@ -10,6 +10,7 @@ import torch
 import numpy as np
 import SimpleITK as sitk
 import matplotlib.pyplot as plt
+import torch.nn.functional as F
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
@@ -17,7 +18,15 @@ from training.model import get_model
 from training.dataset import normalize_intensity, remap_labels, MMWHS_CLASS_NAMES
 
 
-def predict_single_sample(model, image_path, label_path, device, output_dir):
+def predict_single_sample(
+    model,
+    image_path,
+    label_path,
+    device,
+    output_dir,
+    patch_size,
+    stride,
+):
     """预测单个样本"""
     model.eval()
     
@@ -35,13 +44,15 @@ def predict_single_sample(model, image_path, label_path, device, output_dir):
     lbl_arr = remap_labels(lbl_arr)
     img_arr = normalize_intensity(img_arr)
     
-    # 转为tensor（简单处理：直接输入整个体积）
-    img_tensor = torch.from_numpy(img_arr).unsqueeze(0).unsqueeze(0).float().to(device)
-    
     print("开始预测...")
-    with torch.no_grad():
-        output = model(img_tensor)
-        prediction = torch.argmax(output, dim=1).squeeze(0).cpu().numpy()
+    prediction = sliding_window_predict(
+        model,
+        img_arr,
+        device,
+        patch_size=tuple(patch_size),
+        stride=tuple(stride),
+        num_classes=8,
+    )
     
     # 计算Dice
     print("\nDice 分数:")
@@ -118,6 +129,74 @@ def predict_single_sample(model, image_path, label_path, device, output_dir):
     return dice_scores
 
 
+@torch.no_grad()
+def sliding_window_predict(
+    model,
+    image: np.ndarray,
+    device,
+    patch_size=(64, 128, 128),
+    stride=(32, 64, 64),
+    num_classes: int = 8,
+):
+    """滑窗推理，返回整幅预测分割 (D, H, W)。"""
+    model.eval()
+    d, h, w = image.shape
+    pd, ph, pw = patch_size
+    sd, sh, sw = stride
+
+    prediction_sum = np.zeros((num_classes, d, h, w), dtype=np.float32)
+    count_map = np.zeros((d, h, w), dtype=np.float32)
+
+    z_starts = list(range(0, max(d - pd, 0) + 1, sd))
+    y_starts = list(range(0, max(h - ph, 0) + 1, sh))
+    x_starts = list(range(0, max(w - pw, 0) + 1, sw))
+
+    if not z_starts:
+        z_starts = [0]
+    if not y_starts:
+        y_starts = [0]
+    if not x_starts:
+        x_starts = [0]
+
+    if z_starts[-1] != d - pd:
+        z_starts.append(max(d - pd, 0))
+    if y_starts[-1] != h - ph:
+        y_starts.append(max(h - ph, 0))
+    if x_starts[-1] != w - pw:
+        x_starts.append(max(w - pw, 0))
+
+    for z in z_starts:
+        for y in y_starts:
+            for x in x_starts:
+                patch = image[z:z + pd, y:y + ph, x:x + pw]
+                if patch.shape != (pd, ph, pw):
+                    pad_d = pd - patch.shape[0]
+                    pad_h = ph - patch.shape[1]
+                    pad_w = pw - patch.shape[2]
+                    patch = np.pad(
+                        patch,
+                        [(0, pad_d), (0, pad_h), (0, pad_w)],
+                        mode="constant",
+                        constant_values=0,
+                    )
+
+                patch_tensor = torch.from_numpy(patch).unsqueeze(0).unsqueeze(0).float().to(device)
+                output = model(patch_tensor)
+                probs = F.softmax(output, dim=1).squeeze(0).cpu().numpy()
+
+                dz = min(pd, d - z)
+                dy = min(ph, h - y)
+                dx = min(pw, w - x)
+
+                prediction_sum[:, z:z + dz, y:y + dy, x:x + dx] += probs[:, :dz, :dy, :dx]
+                count_map[z:z + dz, y:y + dy, x:x + dx] += 1
+
+    count_map = np.maximum(count_map, 1)
+    prediction_avg = prediction_sum / count_map
+    prediction = np.argmax(prediction_avg, axis=0).astype(np.uint8)
+    return prediction
+
+
 def main():
     parser = argparse.ArgumentParser(description="快速测试单个 MRI 样本")
     parser.add_argument("--checkpoint", type=str, required=True,
@@ -130,6 +209,10 @@ def main():
                         help="模型基础通道数")
     parser.add_argument("--output_dir", type=str, default="quick_test_result",
                         help="结果保存目录")
+    parser.add_argument("--patch_size", type=int, nargs=3, default=[64, 128, 128],
+                        help="滑窗patch大小 (D H W)")
+    parser.add_argument("--stride", type=int, nargs=3, default=[32, 64, 64],
+                        help="滑窗步长 (D H W)")
     parser.add_argument("--device", type=str, default="cuda",
                         help="计算设备")
     
@@ -164,11 +247,13 @@ def main():
     
     # 预测
     predict_single_sample(
-        model, 
-        args.image, 
+        model,
+        args.image,
         args.label,
         device,
-        args.output_dir
+        args.output_dir,
+        args.patch_size,
+        args.stride,
     )
     
     print(f"\n✓ 完成！结果保存在: {args.output_dir}")

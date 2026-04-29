@@ -7,30 +7,41 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 
+def _make_norm(norm_type: str, num_channels: int) -> nn.Module:
+    if norm_type == "batch":
+        return nn.BatchNorm3d(num_channels)
+    if norm_type == "group":
+        groups = min(8, num_channels)
+        while num_channels % groups != 0 and groups > 1:
+            groups -= 1
+        return nn.GroupNorm(groups, num_channels)
+    return nn.InstanceNorm3d(num_channels, affine=True)
+
+
 class ConvBlock3D(nn.Module):
-    """3D卷积块 (Conv3D -> BN -> ReLU) x2"""
+    """3D卷积块 (Conv3D -> Norm -> ReLU) x2"""
     
-    def __init__(self, in_channels: int, out_channels: int):
+    def __init__(self, in_channels: int, out_channels: int, norm_type: str = "instance"):
         super().__init__()
         self.conv1 = nn.Conv3d(in_channels, out_channels, kernel_size=3, padding=1)
-        self.bn1 = nn.BatchNorm3d(out_channels)
+        self.norm1 = _make_norm(norm_type, out_channels)
         self.conv2 = nn.Conv3d(out_channels, out_channels, kernel_size=3, padding=1)
-        self.bn2 = nn.BatchNorm3d(out_channels)
+        self.norm2 = _make_norm(norm_type, out_channels)
         self.relu = nn.ReLU(inplace=True)
     
     def forward(self, x):
-        x = self.relu(self.bn1(self.conv1(x)))
-        x = self.relu(self.bn2(self.conv2(x)))
+        x = self.relu(self.norm1(self.conv1(x)))
+        x = self.relu(self.norm2(self.conv2(x)))
         return x
 
 
 class DownBlock3D(nn.Module):
     """下采样块 (MaxPool3D + ConvBlock)"""
     
-    def __init__(self, in_channels: int, out_channels: int):
+    def __init__(self, in_channels: int, out_channels: int, norm_type: str = "instance"):
         super().__init__()
         self.pool = nn.MaxPool3d(kernel_size=2, stride=2)
-        self.conv = ConvBlock3D(in_channels, out_channels)
+        self.conv = ConvBlock3D(in_channels, out_channels, norm_type=norm_type)
     
     def forward(self, x):
         x = self.pool(x)
@@ -41,10 +52,10 @@ class DownBlock3D(nn.Module):
 class UpBlock3D(nn.Module):
     """上采样块 (Upsample + Concat + ConvBlock)"""
     
-    def __init__(self, in_channels: int, out_channels: int):
+    def __init__(self, in_channels: int, out_channels: int, norm_type: str = "instance"):
         super().__init__()
         self.up = nn.ConvTranspose3d(in_channels, in_channels // 2, kernel_size=2, stride=2)
-        self.conv = ConvBlock3D(in_channels, out_channels)
+        self.conv = ConvBlock3D(in_channels, out_channels, norm_type=norm_type)
     
     def forward(self, x, skip):
         x = self.up(x)
@@ -73,7 +84,13 @@ class UNet3D(nn.Module):
     输出: (B, num_classes, D, H, W)
     """
     
-    def __init__(self, in_channels: int = 1, num_classes: int = 8, base_channels: int = 16):
+    def __init__(
+        self,
+        in_channels: int = 1,
+        num_classes: int = 8,
+        base_channels: int = 16,
+        norm_type: str = "instance",
+    ):
         """
         Args:
             in_channels: 输入通道数（1表示灰度图）
@@ -85,19 +102,19 @@ class UNet3D(nn.Module):
         self.num_classes = num_classes
         
         # Encoder (下采样路径)
-        self.enc1 = ConvBlock3D(in_channels, base_channels)
-        self.enc2 = DownBlock3D(base_channels, base_channels * 2)
-        self.enc3 = DownBlock3D(base_channels * 2, base_channels * 4)
-        self.enc4 = DownBlock3D(base_channels * 4, base_channels * 8)
+        self.enc1 = ConvBlock3D(in_channels, base_channels, norm_type=norm_type)
+        self.enc2 = DownBlock3D(base_channels, base_channels * 2, norm_type=norm_type)
+        self.enc3 = DownBlock3D(base_channels * 2, base_channels * 4, norm_type=norm_type)
+        self.enc4 = DownBlock3D(base_channels * 4, base_channels * 8, norm_type=norm_type)
         
         # Bottleneck
-        self.bottleneck = DownBlock3D(base_channels * 8, base_channels * 16)
+        self.bottleneck = DownBlock3D(base_channels * 8, base_channels * 16, norm_type=norm_type)
         
         # Decoder (上采样路径)
-        self.dec4 = UpBlock3D(base_channels * 16, base_channels * 8)
-        self.dec3 = UpBlock3D(base_channels * 8, base_channels * 4)
-        self.dec2 = UpBlock3D(base_channels * 4, base_channels * 2)
-        self.dec1 = UpBlock3D(base_channels * 2, base_channels)
+        self.dec4 = UpBlock3D(base_channels * 16, base_channels * 8, norm_type=norm_type)
+        self.dec3 = UpBlock3D(base_channels * 8, base_channels * 4, norm_type=norm_type)
+        self.dec2 = UpBlock3D(base_channels * 4, base_channels * 2, norm_type=norm_type)
+        self.dec1 = UpBlock3D(base_channels * 2, base_channels, norm_type=norm_type)
         
         # 输出层
         self.out = nn.Conv3d(base_channels, num_classes, kernel_size=1)
@@ -164,11 +181,16 @@ class DiceLoss(nn.Module):
 class CombinedLoss(nn.Module):
     """组合损失: CrossEntropy + Dice"""
     
-    def __init__(self, ce_weight: float = 0.5, dice_weight: float = 0.5):
+    def __init__(
+        self,
+        ce_weight: float = 0.5,
+        dice_weight: float = 0.5,
+        ce_class_weights: torch.Tensor | None = None,
+    ):
         super().__init__()
         self.ce_weight = ce_weight
         self.dice_weight = dice_weight
-        self.ce_loss = nn.CrossEntropyLoss()
+        self.ce_loss = nn.CrossEntropyLoss(weight=ce_class_weights)
         self.dice_loss = DiceLoss()
     
     def forward(self, pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
@@ -177,9 +199,18 @@ class CombinedLoss(nn.Module):
         return self.ce_weight * ce + self.dice_weight * dice
 
 
-def get_model(num_classes: int = 8, base_channels: int = 16) -> nn.Module:
+def get_model(
+    num_classes: int = 8,
+    base_channels: int = 16,
+    norm_type: str = "instance",
+) -> nn.Module:
     """创建3D U-Net模型"""
-    return UNet3D(in_channels=1, num_classes=num_classes, base_channels=base_channels)
+    return UNet3D(
+        in_channels=1,
+        num_classes=num_classes,
+        base_channels=base_channels,
+        norm_type=norm_type,
+    )
 
 
 if __name__ == "__main__":
