@@ -64,6 +64,58 @@ python backend/training/train_mri.py \
     --device cuda
 ```
 
+### 解剖参数记忆训练（MMWHS MRI）
+```bash
+python backend/training/train_mri_anatomy_prior.py \
+    --data_dir E:\BaiduNetdiskDownload \
+    --modality mr \
+    --crop_size 64 128 128 \
+    --batch_size 1 \
+    --base_channels 16 \
+    --epochs 200 \
+    --lr 0.001 \
+    --anatomy_weight 0.2 \
+    --num_workers 4 \
+    --device cuda
+```
+- 该脚本会先在训练集标签上统计各心脏结构前景占比（均值/标准差），保存为 `anatomy_priors.json`。
+- 训练损失为 `分割损失 + anatomy_weight * 解剖先验损失`，可通过 `--anatomy_weight` 控制“记忆约束”强度。
+- 输出目录示例：`backend/training/checkpoints/mri_unet3d_prior_YYYYMMDD_HHMMSS/`。
+
+### 训练第二模型：正常心脏参数模型（仅正常样本）
+```bash
+python backend/training/train_normal_heart_model.py \
+    --data_dir E:\BaiduNetdiskDownload \
+    --modality mr \
+    --output_model backend/models/mri_normal_heart_model.json \
+    --score_quantile 0.99 \
+    --feature_z_threshold 3.0 \
+    --min_abnormal_features 2
+```
+- 该模型不做分割，只学习“正常参数范围”。
+- 输入是正常样本分割标签（建议 MMWHS 正常样本）。
+- 输出 `mri_normal_heart_model.json`，用于后续是否患病判别。
+
+### 双模型串联推理（分割模型 + 常模模型）
+```bash
+python backend/training/predict_mri.py \
+    --checkpoint backend/models/best_model_mri.pth \
+    --image E:\BaiduNetdiskDownload\mr_test\mr_test_2001_image.nii.gz \
+    --output_dir backend/training/predictions \
+    --normal_model backend/models/mri_normal_heart_model.json \
+    --device cuda
+```
+- 会先输出分割结果 `*_prediction.nii.gz`，再输出常模判别结果 `*_normality.json`。
+- `*_normality.json` 中包含：是否异常、整体分数、超范围特征列表（含 z-score）。
+
+### 仅运行第二模型判别（已有分割结果时）
+```bash
+python backend/training/predict_normality.py \
+    --model_path backend/models/mri_normal_heart_model.json \
+    --segmentation backend/training/predictions/mr_test_2001_prediction.nii.gz \
+    --output_json backend/training/predictions/normality_result.json
+```
+
 ### CPU训练（不推荐，仅用于测试）
 ```bash
 python backend/training/train_mri.py \

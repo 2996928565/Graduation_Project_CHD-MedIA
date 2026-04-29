@@ -128,13 +128,27 @@
             位置：({{ det.bbox.map(v => Math.round(v)).join(', ') }})
           </div>
 
-          <div v-if="det.measurements && det.measurements.width_mm" class="det-measure">
-            <el-icon><Ruler /></el-icon>
-            {{ det.measurements.width_mm }}mm × {{ det.measurements.height_mm }}mm
-            <span v-if="det.measurements.area_mm2">
-              （面积 {{ det.measurements.area_mm2 }} mm²）
-            </span>
+          <div v-if="hasMeasurements(det)" class="det-measure-list">
+            <div
+              v-for="(val, key) in det.measurements"
+              :key="key"
+              class="det-measure-row"
+            >
+              <el-icon><Ruler /></el-icon>
+              <span class="measure-label">{{ formatMeasureLabel(key) }}：</span>
+              <span
+                class="measure-value"
+                :class="{ 'measure-abnormal': isAbnormalMeasure(det.label, key, val) }"
+              >{{ formatMeasureValue(val) }}</span>
+              <el-tag
+                v-if="isAbnormalMeasure(det.label, key, val)"
+                size="small"
+                type="danger"
+                effect="plain"
+              >疑似异常</el-tag>
+            </div>
           </div>
+          <div v-else class="det-measure-empty">暂无结构参数</div>
         </div>
       </el-col>
     </el-row>
@@ -218,6 +232,7 @@ async function loadSlice() {
       segmentation_mask_base64: res.segmentation_mask_base64,
       processing_time_s: res.processing_time_s,
       inference_mode: res.inference_mode,
+      mri_thresholds: res.mri_thresholds || props.result.mri_thresholds || {},
     }
   } finally {
     if (requestId === sliceRequestId) {
@@ -237,6 +252,8 @@ watch(
 
 const displayResult = computed(() => sliceResult.value || props.result)
 
+const mriThresholds = computed(() => displayResult.value?.mri_thresholds || {})
+
 const abnormalCount = computed(
   () => displayResult.value.detections.filter((d) => d.label !== '正常').length,
 )
@@ -255,6 +272,36 @@ const segmentationLegend = [
   { label: '升主动脉', color: '#dc50b4' },
   { label: '肺动脉', color: '#50b4ff' },
 ]
+
+function hasMeasurements(det) {
+  return det.measurements && Object.keys(det.measurements).length > 0
+}
+
+function formatMeasureLabel(key) {
+  const mapping = {
+    width_mm: '宽度',
+    height_mm: '高度',
+    area_mm2: '面积',
+  }
+  return mapping[key] || key
+}
+
+function formatMeasureValue(value) {
+  if (value === null || value === undefined || value === '') return '-'
+  if (typeof value === 'number') return Number.isFinite(value) ? value : '-'
+  return value
+}
+
+function isAbnormalMeasure(label, key, value) {
+  const thresholds = mriThresholds.value || {}
+  const rule = thresholds?.[label]?.[key]
+  if (!Array.isArray(rule) || rule.length !== 2) return false
+  const [min, max] = rule
+  if (typeof value !== 'number' || !Number.isFinite(value)) return false
+  if (typeof min === 'number' && value < min) return true
+  if (typeof max === 'number' && value > max) return true
+  return false
+}
 
 function downloadSegmentationMask() {
   if (!displayResult.value.segmentation_mask_base64) return

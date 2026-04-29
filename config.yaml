@@ -55,3 +55,40 @@ models:
 logging:
   dir: "logs"
   level: "INFO"
+
+# MRI 结构参数正常范围（用于前端异常标记）
+# 请按实际临床或训练数据统计值填写，格式示例：
+# mri_thresholds:
+#   "左心室(LV)":
+#     width_mm: [min, max]
+#     height_mm: [min, max]
+#     area_mm2: [min, max]
+mri_thresholds:
+  "左心室(LV)":
+    width_mm: [35, 55]
+    height_mm: [40, 65]
+    area_mm2: [1400, 2800]
+  "右心室(RV)":
+    width_mm: [25, 45]
+    height_mm: [30, 60]
+    area_mm2: [750, 2000]
+  "左心房(LA)":
+    width_mm: [25, 40]
+    height_mm: [25, 45]
+    area_mm2: [625, 1800]
+  "右心房(RA)":
+    width_mm: [25, 45]
+    height_mm: [25, 50]
+    area_mm2: [625, 1900]
+  "心肌(左室壁/室间隔)":
+    width_mm: [6, 11]
+    height_mm: [6, 11]
+    area_mm2: [36, 121]
+  "升主动脉":
+    width_mm: [20, 36]
+    height_mm: [20, 36]
+    area_mm2: [400, 1296]
+  "肺动脉(主干)":
+    width_mm: [15, 28]
+    height_mm: [15, 28]
+    area_mm2: [225, 784]

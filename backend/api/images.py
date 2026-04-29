@@ -104,6 +104,7 @@ class DetectionResponse(BaseModel):
     segmentation_mask_base64: Optional[str] = None
     segmentation_download_url: Optional[str] = None
     inference_mode: Optional[str] = None
+    mri_thresholds: Optional[Dict[str, Any]] = None
     processing_time_s: float
     image_size: Dict[str, int]
     # NIfTI 3D 结果展示（可选）：前端可据此启用逐层浏览
@@ -366,6 +367,7 @@ async def detect_image(
         segmentation_mask_base64=segmentation_b64,
         segmentation_download_url=segmentation_download_url,
         inference_mode=result.get("inference_mode"),
+        mri_thresholds=settings.mri_thresholds if modality == "mri" else None,
         processing_time_s=result["processing_time_s"],
         image_size=result["image_size"],
         nifti_shape=(dicom_meta or {}).get("nifti_shape") if is_nifti else None,
@@ -495,6 +497,7 @@ async def get_nifti_slice_result(
             "annotated_image_base64": annotated_b64,
             "segmentation_mask_base64": mask_b64,
             "inference_mode": "cache",
+            "mri_thresholds": settings.mri_thresholds,
         }
 
     upload_path = record.upload_path
@@ -547,6 +550,7 @@ async def get_nifti_slice_result(
         "annotated_image_base64": base64.b64encode(annotated_bytes).decode("utf-8"),
         "segmentation_mask_base64": base64.b64encode(mask_bytes).decode("utf-8") if mask_bytes else None,
         "inference_mode": result.get("inference_mode"),
+        "mri_thresholds": settings.mri_thresholds,
     }
 
 

@@ -3,6 +3,7 @@ MRI 模型推理脚本（无需标签）
 仅进行预测，保存分割结果
 """
 import sys
+import json
 from pathlib import Path
 import argparse
 
@@ -16,9 +17,10 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from training.model import get_model
 from training.dataset import normalize_intensity, MMWHS_CLASS_NAMES
+from training.normal_heart_model import extract_case_features, load_normal_heart_model
 
 
-def predict_single_image(model, image_path, device, output_dir):
+def predict_single_image(model, image_path, device, output_dir, normal_model=None):
     """预测单个图像（无需标签）"""
     model.eval()
     
@@ -61,6 +63,28 @@ def predict_single_image(model, image_path, device, output_dir):
     pred_path = output_dir / f"{case_name}_prediction.nii.gz"
     sitk.WriteImage(pred_sitk, str(pred_path))
     print(f"\n✓ 预测结果已保存: {pred_path}")
+
+    normality_result = None
+    if normal_model is not None:
+        spacing_xyz = tuple(float(v) for v in img_sitk.GetSpacing())
+        features = extract_case_features(prediction, spacing_xyz=spacing_xyz)
+        normality_result = normal_model.evaluate_features(features)
+        status = "异常" if normality_result["is_abnormal"] else "正常"
+        print(
+            f"常模判别: {status} | "
+            f"score={normality_result['score']:.4f} "
+            f"(thr={normality_result['score_threshold']:.4f})"
+        )
+        if normality_result["abnormal_features"]:
+            print("  异常特征Top3:")
+            for item in normality_result["abnormal_features"][:3]:
+                print(f"    - {item['feature']}: z={item['z_score']:.3f}, value={item['value']:.4f}")
+        normality_json_path = output_dir / f"{case_name}_normality.json"
+        normality_json_path.write_text(
+            json.dumps(normality_result, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        print(f"✓ 常模判别结果已保存: {normality_json_path}")
     
     # 可视化多个切片
     vis_dir = output_dir / "visualizations"
@@ -95,10 +119,10 @@ def predict_single_image(model, image_path, device, output_dir):
         
         print(f"  ✓ 保存可视化: {save_path.name}")
     
-    return prediction
+    return prediction, normality_result
 
 
-def predict_batch(model, data_dir, modality, device, output_dir):
+def predict_batch(model, data_dir, modality, device, output_dir, normal_model=None):
     """批量预测（无需标签）"""
     model.eval()
     
@@ -130,8 +154,40 @@ def predict_batch(model, data_dir, modality, device, output_dir):
     # 预测每个样本
     for idx, image_file in enumerate(test_files):
         print(f"\n[{idx+1}/{len(test_files)}] {'='*50}")
-        predict_single_image(model, str(image_file), device, output_dir)
+        predict_single_image(model, str(image_file), device, output_dir, normal_model=normal_model)
     
+    print(f"\n{'='*60}")
+    print(f"✓ 所有预测完成！结果保存在: {output_dir}")
+    print(f"{'='*60}")
+
+
+def predict_batch_by_glob(model, glob_root, input_glob, device, output_dir, normal_model=None):
+    """按自定义 glob 模式批量预测"""
+    model.eval()
+
+    root = Path(glob_root)
+    if not root.exists():
+        raise FileNotFoundError(f"glob_root 不存在: {root}")
+
+    test_files = sorted(list(root.glob(input_glob)))
+    if not test_files:
+        raise FileNotFoundError(
+            f"未找到匹配图像！\n"
+            f"搜索根目录: {root}\n"
+            f"搜索模式: {input_glob}"
+        )
+
+    print(f"\n找到 {len(test_files)} 个测试样本")
+    print(f"搜索根目录: {root}")
+    print(f"搜索模式: {input_glob}\n")
+
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    for idx, image_file in enumerate(test_files):
+        print(f"\n[{idx+1}/{len(test_files)}] {'='*50}")
+        predict_single_image(model, str(image_file), device, output_dir, normal_model=normal_model)
+
     print(f"\n{'='*60}")
     print(f"✓ 所有预测完成！结果保存在: {output_dir}")
     print(f"{'='*60}")
@@ -152,13 +208,19 @@ def main():
                        help="单个图像路径 (*_image.nii.gz)")
     group.add_argument("--data_dir", type=str,
                        help="批量预测：数据根目录")
+    group.add_argument("--input_glob", type=str,
+                       help="批量预测：自定义glob模式（例: mr_train/mr_train_*_image.nii.gz）")
     
     parser.add_argument("--modality", type=str, default="mr",
                         help="模态 (mr 或 ct)")
     parser.add_argument("--output_dir", type=str, default="predictions",
                         help="结果保存目录")
+    parser.add_argument("--glob_root", type=str, default=".",
+                        help="自定义glob的搜索根目录（仅 --input_glob 生效）")
     parser.add_argument("--device", type=str, default="cuda",
                         help="计算设备")
+    parser.add_argument("--normal_model", type=str, default="",
+                        help="可选：常模模型json路径，提供后会进行第二模型判别")
     
     args = parser.parse_args()
     
@@ -185,6 +247,16 @@ def main():
     if 'epoch' in checkpoint:
         print(f"训练轮数: {checkpoint['epoch']}")
     
+    # 常模模型（可选）
+    normal_model = None
+    if args.normal_model:
+        normal_path = Path(args.normal_model)
+        if not normal_path.exists():
+            print(f"错误: 常模模型不存在: {normal_path}")
+            return
+        normal_model = load_normal_heart_model(normal_path)
+        print(f"常模模型加载成功: {normal_path}")
+
     # 预测
     if args.image:
         # 单个文件预测
@@ -192,10 +264,22 @@ def main():
             print(f"错误: 图像文件不存在: {args.image}")
             return
         
-        predict_single_image(model, args.image, device, args.output_dir)
+        _prediction, _normality = predict_single_image(
+            model, args.image, device, args.output_dir, normal_model=normal_model
+        )
+    elif args.input_glob:
+        # 自定义glob批量预测
+        predict_batch_by_glob(
+            model=model,
+            glob_root=args.glob_root,
+            input_glob=args.input_glob,
+            device=device,
+            output_dir=args.output_dir,
+            normal_model=normal_model,
+        )
     else:
         # 批量预测
-        predict_batch(model, args.data_dir, args.modality, device, args.output_dir)
+        predict_batch(model, args.data_dir, args.modality, device, args.output_dir, normal_model=normal_model)
     
     print(f"\n✓ 完成！结果保存在: {args.output_dir}")
 
