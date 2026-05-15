@@ -5,12 +5,13 @@
 """
 from datetime import datetime
 from io import BytesIO
+import base64
 import json
 from typing import Any, Dict, List
 
 from loguru import logger
 from docx import Document
-from docx.shared import Pt, RGBColor
+from docx.shared import Pt, RGBColor, Inches
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 
 from config.settings import settings
@@ -42,14 +43,134 @@ def _build_detection_summary(detections: List[Dict]) -> str:
     return "\n".join(lines)
 
 
+def _format_numeric_text(value: Any) -> str:
+    """统一报告中的数值显示格式。"""
+    if isinstance(value, (int, float)):
+        return f"{value:.4f}" if abs(value) < 100 else f"{value:.2f}"
+    return "-"
+
+
+def _format_feature_name(name: str) -> str:
+    """将第二模型特征名格式化为更易读的中文名称。"""
+    direct_map = {
+        "fg_total_voxels": "前景总体素数",
+        "fg_total_volume_ml": "前景总体积(ml)",
+        "ratio_lv_rv": "左室/右室体积比",
+        "ratio_la_ra": "左房/右房体积比",
+        "ratio_myo_lv": "心肌/左室体积比",
+        "ratio_ao_pa": "升主动脉/肺动脉体积比",
+    }
+    if name in direct_map:
+        return direct_map[name]
+
+    cls_map = {
+        "c1": "左心室",
+        "c2": "右心室",
+        "c3": "左心房",
+        "c4": "右心房",
+        "c5": "心肌",
+        "c6": "升主动脉",
+        "c7": "肺动脉",
+    }
+    metric_map = {
+        "ratio_fg": "占前景比例",
+        "volume_ml": "体积(ml)",
+        "extent_x_mm": "X向跨度(mm)",
+        "extent_y_mm": "Y向跨度(mm)",
+        "extent_z_mm": "Z向跨度(mm)",
+    }
+    parts = name.split("_")
+    if len(parts) >= 3 and parts[0] in cls_map:
+        cls = cls_map[parts[0]]
+        metric_key = "_".join(parts[1:])
+        metric = metric_map.get(metric_key, metric_key)
+        return f"{cls}-{metric}"
+    return name
+
+
+def _get_abnormal_direction(item: Dict[str, Any]) -> str:
+    """根据第二模型返回的偏差值判断偏高/偏低。"""
+    signed = item.get("residual_std", item.get("z_score", None))
+    if isinstance(signed, (int, float)):
+        if signed > 0:
+            return "偏高"
+        if signed < 0:
+            return "偏低"
+    return "偏离"
+
+
+def _build_normality_summary(normality: Dict[str, Any] | None, topk: int = 5) -> str:
+    """将第二模型异常特征转换为自然语言摘要，并标注偏高/偏低。"""
+    if not normality:
+        return ""
+
+    abnormal_features = normality.get("abnormal_features") or []
+    if not isinstance(abnormal_features, list) or len(abnormal_features) == 0:
+        return ""
+
+    lines = []
+    for i, item in enumerate(abnormal_features[:topk], 1):
+        feature = _format_feature_name(str(item.get("feature", "未知特征")))
+        value = item.get("value", None)
+        direction = _get_abnormal_direction(item)
+        value_text = _format_numeric_text(value)
+
+        lines.append(f"{i}. {feature}（{direction}，当前值：{value_text}）")
+
+    return "\n".join(lines)
+
+
+def _build_mri_all_detections_summary(normality: Dict[str, Any] | None) -> str:
+    """MRI 报告的“全部检测结果”优先展示第二模型结果。"""
+    if not normality:
+        return "未获取到第二模型结果"
+
+    model_input_features = normality.get("model_input_features") or {}
+    abnormal_features = normality.get("abnormal_features") or []
+    if not isinstance(model_input_features, dict) or len(model_input_features) == 0:
+        return "未获取到第二模型指标数据"
+
+    abnormal_map: Dict[str, Dict[str, Any]] = {}
+    if isinstance(abnormal_features, list):
+        for item in abnormal_features:
+            feature_name = str(item.get("feature", "")).strip()
+            if feature_name:
+                abnormal_map[feature_name] = item
+
+    lines = []
+    for idx, (feature_name, value) in enumerate(model_input_features.items(), start=1):
+        abnormal_item = abnormal_map.get(feature_name)
+        status = _get_abnormal_direction(abnormal_item) if abnormal_item else "正常"
+        lines.append(
+            f"{idx}. {_format_feature_name(feature_name)}（当前值：{_format_numeric_text(value)}，状态：{status}）"
+        )
+
+    return "\n".join(lines)
+
+
+def _build_report_all_detections(
+    modality: str,
+    detections: List[Dict],
+    normality: Dict[str, Any] | None = None,
+) -> str:
+    """生成报告中“全部检测结果”的内容。"""
+    if modality == "mri" and normality is not None:
+        return _build_mri_all_detections_summary(normality)
+    return _build_detection_summary(detections)
+
+
 def _build_structured_report(
     modality: str,
     patient_info: Dict,
     detections: List[Dict],
+    normality: Dict[str, Any] | None = None,
 ) -> Dict[str, str]:
     """根据检测结果生成固定模板结构化报告。"""
     det_summary = _build_detection_summary(detections)
+    all_detections_summary = _build_report_all_detections(modality, detections, normality)
+    normality_summary = _build_normality_summary(normality)
     has_anomaly = any(d.get("label", "") not in ("正常",) for d in detections)
+    normality_abnormal = bool((normality or {}).get("is_abnormal", False))
 
     if modality == "ultrasound":
         normal_findings = (
@@ -81,11 +202,12 @@ def _build_structured_report(
             "心肌信号分布尚均匀，室间隔及房间隔连续性可，"
             "大血管起源与走行未见明显异常，心包区未见明显积液。"
         )
-        anomaly_findings = (
-            "心脏MRI（CMR）检查提示结构异常征象："
-            f"{det_summary}。"
-            "建议结合序列参数及必要的增强检查进一步评估。"
-        )
+        anomaly_findings = "心脏MRI（CMR）检查提示结构异常征象："
+        if normality_summary:
+            anomaly_findings += f"{normality_summary}。"
+        else:
+            anomaly_findings += f"{det_summary}。"
+        anomaly_findings += "建议结合序列参数及必要的增强检查进一步评估。"
         findings = anomaly_findings if has_anomaly else normal_findings
         suggestion = (
             "•CMR提示心脏结构异常，考虑先天性心脏病相关改变可能\n"
@@ -94,6 +216,12 @@ def _build_structured_report(
             if has_anomaly
             else "•本次CMR未见明确心脏结构异常影像学表现"
         )
+        if normality_abnormal and normality_summary:
+            suggestion = (
+                "•第二模型常模判别提示结构参数偏离正常范围\n"
+                "•建议结合分割详细数据与临床症状进一步评估\n"
+                "•必要时行专科会诊"
+            )
         recommendations = (
             "建议3个月内复查CMR或根据临床需要提前复查；必要时补充CTA/超声评估"
             if has_anomaly
@@ -104,7 +232,11 @@ def _build_structured_report(
         "exam_type": "超声心动图" if modality == "ultrasound" else "心脏磁共振成像（CMR）",
         "exam_part": "心脏" if modality == "ultrasound" else "心脏及大血管",
         "image_findings": findings,
-        "abnormal_findings": det_summary if has_anomaly else "未见明显异常",
+        "all_detections": all_detections_summary,
+        "abnormal_findings": (
+            normality_summary if (normality_abnormal and normality_summary) else
+            (det_summary if has_anomaly else "未见明显异常")
+        ),
         "preliminary_suggestion": suggestion,
         "recommendations": recommendations,
     }
@@ -152,10 +284,13 @@ async def _generate_report_llm(
     modality: str,
     patient_info: Dict[str, Any],
     detections: List[Dict[str, Any]],
+    normality: Dict[str, Any] | None = None,
 ) -> Dict[str, str]:
     """使用 DashScope/Qwen 生成结构化报告（JSON）。"""
 
     det_summary = _build_detection_summary(detections)
+    all_detections_summary = _build_report_all_detections(modality, detections, normality)
+    normality_summary = _build_normality_summary(normality)
     exam_type = "超声心动图" if modality == "ultrasound" else "心脏磁共振成像（CMR）"
     exam_part = "心脏" if modality == "ultrasound" else "心脏及大血管"
 
@@ -163,12 +298,13 @@ async def _generate_report_llm(
         "你是资深医学影像科医师，负责根据‘检测结果摘要’生成结构化中文医学报告。\n"
         "请严格输出一个 JSON 对象（不要 Markdown、不要多余解释）。\n"
         "JSON 必须包含以下字段，值均为中文字符串：\n"
-        "exam_type, exam_part, image_findings, abnormal_findings, preliminary_suggestion, recommendations\n"
+        "exam_type, exam_part, image_findings, all_detections, abnormal_findings, preliminary_suggestion, recommendations\n"
         "写作要求：\n"
         "- 内容客观、谨慎，避免绝对化诊断；\n"
         "- 可使用条目符号（如 ‘•’）组织建议；\n"
         "- 不要编造未提供的检查数据（如 EF、具体序列参数）；\n"
         "- ‘exam_type’ 固定为给定值，不要改。\n"
+        "- 对 MRI 报告，‘all_detections’ 必须优先依据第二模型结果生成。\n"
     )
 
     user_prompt = (
@@ -177,6 +313,8 @@ async def _generate_report_llm(
         f"exam_part: {exam_part}\n"
         f"患者信息: 姓名={patient_info.get('name','')}, 年龄={patient_info.get('age','')}, 性别={patient_info.get('sex','')}\n"
         f"检测结果摘要:\n{det_summary}\n"
+        f"第二模型异常特征摘要:\n{normality_summary or '无'}\n"
+        f"报告“全部检测结果”应基于以下摘要:\n{all_detections_summary}\n"
         "请生成上述字段的 JSON。"
     )
 
@@ -197,6 +335,7 @@ async def _generate_report_llm(
         "exam_type",
         "exam_part",
         "image_findings",
+        "all_detections",
         "abnormal_findings",
         "preliminary_suggestion",
         "recommendations",
@@ -208,6 +347,7 @@ async def _generate_report_llm(
     # 强制固定字段，避免模型乱改
     obj["exam_type"] = exam_type
     obj["exam_part"] = exam_part
+    obj["all_detections"] = all_detections_summary
     return {k: str(obj[k]).strip() for k in required}
 
 
@@ -219,6 +359,8 @@ async def generate_report(
     modality: str,
     patient_info: Dict[str, Any],
     detections: List[Dict[str, Any]],
+    normality: Dict[str, Any] | None = None,
+    report_images: Dict[str, Any] | None = None,
 ) -> Dict[str, Any]:
     """
     生成诊断报告。
@@ -243,15 +385,15 @@ async def generate_report(
     if (settings.dashscope_api_key or "").strip():
         try:
             logger.info(f"使用 Qwen 生成报告（模态: {modality}，model: {settings.dashscope_model}）")
-            report_data = await _generate_report_llm(modality, patient_info, detections)
+            report_data = await _generate_report_llm(modality, patient_info, detections, normality=normality)
             source = "qwen_llm"
         except (QwenClientError, ValueError, json.JSONDecodeError) as e:
             logger.warning(f"LLM 报告生成失败，回退到固定模板: {e}")
-            report_data = _build_structured_report(modality, patient_info, detections)
+            report_data = _build_structured_report(modality, patient_info, detections, normality=normality)
             source = "template_rule_based_fallback"
     else:
         logger.info(f"未配置 DashScope API Key，使用固定医学模板生成报告（模态: {modality}）")
-        report_data = _build_structured_report(modality, patient_info, detections)
+        report_data = _build_structured_report(modality, patient_info, detections, normality=normality)
         source = "template_rule_based"
 
     return {
@@ -263,6 +405,7 @@ async def generate_report(
             "detection_count": len(detections),
             "source": source,
             "llm_model": settings.dashscope_model if source.startswith("qwen") else None,
+            "report_images": report_images or {},
         },
     }
 
@@ -270,6 +413,15 @@ async def generate_report(
 # ──────────────────────────────────────────────────────────────────────────────
 # Word 导出
 # ──────────────────────────────────────────────────────────────────────────────
+
+def _safe_decode_image(base64_text: str | None) -> bytes | None:
+    if not base64_text or not isinstance(base64_text, str):
+        return None
+    try:
+        return base64.b64decode(base64_text)
+    except Exception:
+        return None
+
 
 def export_report_to_docx(report: Dict[str, Any]) -> bytes:
     """
@@ -285,6 +437,7 @@ def export_report_to_docx(report: Dict[str, Any]) -> bytes:
     data = report.get("report_data", {})
     meta = report.get("metadata", {})
     patient_info = meta.get("patient_info", {})
+    report_images = meta.get("report_images", {}) or {}
 
     # ── 标题 ──
     title = doc.add_heading("先天性心脏病影像诊断报告（初步）", 0)
@@ -317,7 +470,7 @@ def export_report_to_docx(report: Dict[str, Any]) -> bytes:
 
     # ── 报告内容 ──
     sections = [
-        ("一、影像学表现", data.get("image_findings", "")),
+        ("一、全部检测结果", data.get("all_detections", "")),
         ("二、异常发现", data.get("abnormal_findings", "")),
         ("三、初步诊断意见", data.get("preliminary_suggestion", "")),
         ("四、建议", data.get("recommendations", "")),
@@ -327,6 +480,18 @@ def export_report_to_docx(report: Dict[str, Any]) -> bytes:
         h = doc.add_heading(heading, level=2)
         para = doc.add_paragraph(content or "无")
         para.runs[0].font.size = Pt(11)
+
+    # ── 检测图像 ──
+    annotated_bytes = _safe_decode_image(report_images.get("annotated_image_base64"))
+    mask_bytes = _safe_decode_image(report_images.get("segmentation_mask_base64"))
+    if annotated_bytes or mask_bytes:
+        doc.add_heading("五、检测图像", level=2)
+        if annotated_bytes:
+            doc.add_paragraph("标注影像")
+            doc.add_picture(BytesIO(annotated_bytes), width=Inches(5.8))
+        if mask_bytes:
+            doc.add_paragraph("分割 Mask")
+            doc.add_picture(BytesIO(mask_bytes), width=Inches(5.8))
 
     # ── 免责声明 ──
     doc.add_paragraph()

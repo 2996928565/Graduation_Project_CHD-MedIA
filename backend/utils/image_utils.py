@@ -164,6 +164,7 @@ def draw_detections(
     image: np.ndarray,
     detections: list,
     color: Tuple[int, int, int] = (0, 0, 255),
+    label_font_scale: float = 0.5,
 ) -> np.ndarray:
     """
     在影像上绘制检测框和标签。
@@ -177,16 +178,43 @@ def draw_detections(
               "bbox": [x1, y1, x2, y2],  # 像素坐标
             }
         color: BGR 颜色元组
+        label_font_scale: 标签字体缩放
 
     Returns:
         标注后的 BGR 数组
     """
     annotated = image.copy()
+    english_label_map = {
+        "背景": "BG",
+        "左心室(LV)": "LV",
+        "右心室(RV)": "RV",
+        "左心房(LA)": "LA",
+        "右心房(RA)": "RA",
+        "心肌": "MYO",
+        "升主动脉": "AO",
+        "肺动脉": "PA",
+        "室间隔缺损(VSD)": "VSD",
+        "房间隔缺损(ASD)": "ASD",
+        "动脉导管未闭(PDA)": "PDA",
+        "肺动脉狭窄": "PS",
+        "主动脉缩窄": "CoA",
+        "三尖瓣反流": "TR",
+        "二尖瓣反流": "MR",
+        "心室壁异常增厚": "VH",
+        "心包积液": "PE",
+        "心肌异常": "MYO",
+        "室间隔": "IVS",
+        "主动脉": "AO",
+        "异常": "abnormal",
+        "正常": "normal",
+    }
 
     def _safe_label_text(label: str) -> str:
-        """OpenCV 不支持中文字体时，优先提取括号内英文缩写，避免乱码。"""
         if not label:
-            return "abnormal"
+            return ""
+        normalized = str(label).strip()
+        if normalized in english_label_map:
+            return english_label_map[normalized]
         if label.isascii():
             return label
 
@@ -196,30 +224,98 @@ def draw_detections(
             return abbr[-1]
 
         ascii_only = "".join(ch for ch in label if ord(ch) < 128).strip()
-        return ascii_only if ascii_only else "abnormal"
+        return ascii_only if ascii_only else ""
 
-    for det in detections:
+    def _find_cjk_font(size_px: int) -> Optional[ImageFont.ImageFont]:
+        font_candidates = [
+            r"C:\Windows\Fonts\msyh.ttc",
+            r"C:\Windows\Fonts\msyhbd.ttc",
+            r"C:\Windows\Fonts\simhei.ttf",
+            r"C:\Windows\Fonts\simsun.ttc",
+            r"C:\Windows\Fonts\arialuni.ttf",
+        ]
+        for path in font_candidates:
+            try:
+                return ImageFont.truetype(path, size=size_px)
+            except Exception:
+                continue
+        return None
+
+    label_samples = [str(d.get("label", "")) for d in (detections or [])]
+    display_samples = [_safe_label_text(s) for s in label_samples]
+    use_pil = any((t and not t.isascii()) for t in display_samples)
+
+    if not use_pil:
+        for det in (detections or []):
+            bbox = det.get("bbox", [])
+            if len(bbox) != 4:
+                continue
+            label = det.get("label", "异常")
+            if str(label).strip().lower() == "abnormal":
+                continue
+            x1, y1, x2, y2 = [int(v) for v in bbox]
+            conf = det.get("confidence", 0.0)
+
+            cv2.rectangle(annotated, (x1, y1), (x2, y2), color, 2)
+
+            safe_label = _safe_label_text(str(label))
+            if not safe_label:
+                continue
+            text = f"{safe_label} {conf:.2f}"
+            (tw, th), _ = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, label_font_scale, 1)
+            top_y = max(y1 - th - 6, 0)
+            cv2.rectangle(annotated, (x1, top_y), (x1 + tw + 4, y1), color, -1)
+            cv2.putText(
+                annotated,
+                text,
+                (x1 + 2, max(y1 - 4, 12)),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                label_font_scale,
+                (255, 255, 255),
+                1,
+            )
+        return annotated
+
+    pil_img = Image.fromarray(cv2.cvtColor(annotated, cv2.COLOR_BGR2RGB))
+    draw = ImageDraw.Draw(pil_img)
+    font_size = max(int(22 * float(label_font_scale)), 10)
+    font = _find_cjk_font(font_size)
+    color_rgb = (int(color[2]), int(color[1]), int(color[0]))
+
+    for det in (detections or []):
         bbox = det.get("bbox", [])
         if len(bbox) != 4:
             continue
-        x1, y1, x2, y2 = [int(v) for v in bbox]
         label = det.get("label", "异常")
+        if str(label).strip().lower() == "abnormal":
+            continue
+        x1, y1, x2, y2 = [int(v) for v in bbox]
         conf = det.get("confidence", 0.0)
 
-        # 绘制矩形框
-        cv2.rectangle(annotated, (x1, y1), (x2, y2), color, 2)
+        for t in range(2):
+            draw.rectangle([x1 - t, y1 - t, x2 + t, y2 + t], outline=color_rgb)
 
-        # 绘制标签背景
-        safe_label = _safe_label_text(label)
+        safe_label = _safe_label_text(str(label))
+        if not safe_label:
+            continue
+
+        if not font and not safe_label.isascii():
+            continue
+
         text = f"{safe_label} {conf:.2f}"
-        (tw, th), _ = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)
+        if not font and not text.isascii():
+            continue
+        text_font = font if font else ImageFont.load_default()
+
+        left, top, right, bottom = draw.textbbox((0, 0), text, font=text_font)
+        tw, th = right - left, bottom - top
         top_y = max(y1 - th - 6, 0)
-        cv2.rectangle(annotated, (x1, top_y), (x1 + tw + 4, y1), color, -1)
-        cv2.putText(
-            annotated, text, (x1 + 2, max(y1 - 4, 12)),
-            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1,
-        )
-    return annotated
+
+        draw.rectangle([x1, top_y, x1 + tw + 4, y1], fill=color_rgb)
+        draw.text((x1 + 2, max(y1 - th - 4, 0)), text, fill=(255, 255, 255), font=text_font)
+
+    pil_np = cv2.cvtColor(np.array(pil_img), cv2.COLOR_RGB2BGR)
+    return pil_np
 
 
 def overlay_segmentation_mask(

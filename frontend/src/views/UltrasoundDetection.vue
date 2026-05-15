@@ -2,7 +2,18 @@
   <div>
     <div class="page-header">
       <h2><el-icon><VideoCamera /></el-icon> 心脏超声检测</h2>
-      <el-tag type="primary">超声心动图 / 二维超声</el-tag>
+      <div class="page-actions">
+        <el-button
+          v-if="hasContent"
+          type="danger"
+          plain
+          size="small"
+          @click="clearCurrentState"
+        >
+          清空当前内容
+        </el-button>
+        <el-tag type="primary">超声心动图 / 二维超声</el-tag>
+      </div>
     </div>
 
     <!-- 患者选择 -->
@@ -42,6 +53,7 @@
         <el-card shadow="never">
           <template #header><span class="card-title">上传超声影像</span></template>
           <ImageUpload
+            ref="uploadRef"
             modality="ultrasound"
             accept=".png,.jpg,.jpeg,.dcm,.dicom"
             @file-selected="onFileSelected"
@@ -95,7 +107,7 @@
 </template>
 
 <script setup>
-import { ref, onMounted } from 'vue'
+import { ref, onMounted, computed, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { detectImage, uploadPreview } from '@/api/images.js'
@@ -104,6 +116,7 @@ import DetectionResult from '@/components/DetectionResult.vue'
 
 const route = useRoute()
 const router = useRouter()
+const CACHE_KEY = 'chd_ultrasound_detection_state_v1'
 
 function parseQueryAge(v) {
   if (v === undefined || v === null || v === '') return null
@@ -115,22 +128,56 @@ function normalizeSex(v) {
   return ['男', '女', '未知'].includes(v) ? v : '未知'
 }
 
+const patientId = ref(route.query.patientId || '')
 const patientName = ref(route.query.name || '')
 const patientAge = ref(parseQueryAge(route.query.age))
 const patientSex = ref(normalizeSex(route.query.sex))
 const threshold = ref(0.5)
 
+const uploadRef = ref(null)
 const selectedFile = ref(null)
 const previewSrc = ref('')
 const detecting = ref(false)
 const detectionResult = ref(null)
+const hasRoutePrefill = computed(
+  () => Boolean(patientId.value || route.query.name || route.query.age || route.query.sex),
+)
+const hasContent = computed(
+  () => Boolean(
+    selectedFile.value ||
+    previewSrc.value ||
+    detectionResult.value ||
+    patientId.value ||
+    patientName.value ||
+    patientAge.value !== null ||
+    (patientSex.value && patientSex.value !== '未知')
+  ),
+)
 
 function onFileSelected({ file, previewBase64 }) {
   selectedFile.value = file
-  previewSrc.value = previewBase64
-    ? `data:image/png;base64,${previewBase64}`
-    : URL.createObjectURL(file)
+  previewSrc.value = !file
+    ? ''
+    : previewBase64
+      ? `data:image/png;base64,${previewBase64}`
+      : URL.createObjectURL(file)
   detectionResult.value = null
+}
+
+function clearCurrentState() {
+  selectedFile.value = null
+  previewSrc.value = ''
+  detectionResult.value = null
+  detecting.value = false
+  patientId.value = ''
+  patientName.value = ''
+  patientAge.value = null
+  patientSex.value = '未知'
+  threshold.value = 0.5
+  uploadRef.value?.clearFile?.()
+  sessionStorage.removeItem(CACHE_KEY)
+  router.replace({ path: route.path, query: {} })
+  ElMessage.success('已清空当前检测内容')
 }
 
 async function runDetection() {
@@ -140,7 +187,7 @@ async function runDetection() {
   }
   detecting.value = true
   try {
-    const result = await detectImage(selectedFile.value, 'ultrasound', threshold.value)
+    const result = await detectImage(selectedFile.value, 'ultrasound', threshold.value, patientId.value || null)
     detectionResult.value = result
     ElMessage.success(`检测完成，发现 ${result.detections.length} 条结果`)
   } finally {
@@ -153,6 +200,7 @@ function goToReport() {
     path: '/report',
     query: {
       modality: 'ultrasound',
+      patientId: patientId.value || '',
       name: patientName.value,
       age: patientAge.value,
       sex: patientSex.value,
@@ -160,6 +208,52 @@ function goToReport() {
     },
   })
 }
+
+function savePageState() {
+  const payload = {
+    patientId: patientId.value || '',
+    patientName: patientName.value || '',
+    patientAge: patientAge.value,
+    patientSex: patientSex.value || '未知',
+    threshold: threshold.value,
+    previewSrc: previewSrc.value || '',
+    detectionResult: detectionResult.value || null,
+  }
+  sessionStorage.setItem(CACHE_KEY, JSON.stringify(payload))
+}
+
+function restorePageState() {
+  const raw = sessionStorage.getItem(CACHE_KEY)
+  if (!raw) return
+  try {
+    const state = JSON.parse(raw)
+    patientId.value = state.patientId || ''
+    patientName.value = state.patientName || ''
+    patientAge.value = parseQueryAge(state.patientAge)
+    patientSex.value = normalizeSex(state.patientSex)
+    threshold.value = Number.isFinite(Number(state.threshold)) ? Number(state.threshold) : 0.5
+    previewSrc.value = state.previewSrc || ''
+    detectionResult.value = state.detectionResult || null
+  } catch {
+    sessionStorage.removeItem(CACHE_KEY)
+  }
+}
+
+onMounted(() => {
+  if (!hasRoutePrefill.value) {
+    restorePageState()
+    return
+  }
+  savePageState()
+})
+
+watch(
+  [patientId, patientName, patientAge, patientSex, threshold, previewSrc, detectionResult],
+  () => {
+    savePageState()
+  },
+  { deep: true },
+)
 </script>
 
 <style scoped>
@@ -168,6 +262,11 @@ function goToReport() {
   justify-content: space-between;
   align-items: center;
   margin-bottom: 16px;
+}
+.page-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
 }
 .page-header h2 {
   margin: 0;

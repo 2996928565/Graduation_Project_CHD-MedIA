@@ -66,11 +66,16 @@
           </el-col>
           <el-col :span="12">
             <el-form-item label="检查模态" prop="exam_modality">
-              <el-select v-model="form.exam_modality" style="width:100%">
-                <el-option label="心脏超声" value="ultrasound" />
-                <el-option label="心脏 MRI（CMR）" value="mri" />
-                <el-option label="超声 + MRI" value="both" />
-              </el-select>
+              <template v-if="isEdit">
+                <el-select v-model="form.exam_modality" style="width:100%">
+                  <el-option label="心脏超声" value="ultrasound" />
+                  <el-option label="心脏 MRI（CMR）" value="mri" />
+                  <el-option label="超声 + MRI" value="both" />
+                </el-select>
+              </template>
+              <template v-else>
+                <span class="fixed-value">心脏 MRI（CMR）</span>
+              </template>
             </el-form-item>
           </el-col>
         </el-row>
@@ -120,7 +125,7 @@
 <script setup>
 import { ref, reactive, computed, onMounted } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
-import { ElMessage } from 'element-plus'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import { createPatient, getPatient, updatePatient } from '@/api/patients.js'
 import { useAuthStore } from '@/store/auth.js'
 
@@ -193,15 +198,75 @@ async function handleSubmit() {
       if (isEdit.value) {
         await updatePatient(route.params.id, form)
         ElMessage.success('患者信息更新成功')
+        router.push('/patients')
       } else {
-        await createPatient(form)
+        const created = await createPatient(form)
         ElMessage.success('患者信息保存成功')
+        await askDetectAfterCreate(created)
       }
-      router.push('/patients')
     } finally {
       loading.value = false
     }
   })
+}
+
+function buildDetectQuery(patient) {
+  return {
+    patientId: patient?.patient_id || '',
+    name: patient?.name || form.name || '',
+    age: patient?.age ?? form.age ?? '',
+    sex: patient?.sex || form.sex || '未知',
+  }
+}
+
+async function askDetectAfterCreate(createdPatient) {
+  const query = buildDetectQuery(createdPatient)
+  const modality = createdPatient?.exam_modality || form.exam_modality
+
+  if (modality === 'mri') {
+    try {
+      await ElMessageBox.confirm('患者信息已保存，是否立即前往影像检测？', '保存成功', {
+        confirmButtonText: '去检测',
+        cancelButtonText: '返回列表',
+        type: 'success',
+      })
+      router.push({ path: '/mri', query })
+    } catch {
+      router.push('/patients')
+    }
+    return
+  }
+
+  if (modality === 'ultrasound') {
+    try {
+      await ElMessageBox.confirm('患者信息已保存，是否立即前往超声检测？', '保存成功', {
+        confirmButtonText: '去检测',
+        cancelButtonText: '返回列表',
+        type: 'success',
+      })
+      router.push({ path: '/ultrasound', query })
+    } catch {
+      router.push('/patients')
+    }
+    return
+  }
+
+  // both: 确定=影像，取消=超声，关闭=返回列表
+  try {
+    await ElMessageBox.confirm('患者信息已保存。选择“影像检测”或“超声检测”继续。', '保存成功', {
+      confirmButtonText: '影像检测',
+      cancelButtonText: '超声检测',
+      distinguishCancelAndClose: true,
+      type: 'success',
+    })
+    router.push({ path: '/mri', query })
+  } catch (action) {
+    if (action === 'cancel') {
+      router.push({ path: '/ultrasound', query })
+    } else {
+      router.push('/patients')
+    }
+  }
 }
 </script>
 

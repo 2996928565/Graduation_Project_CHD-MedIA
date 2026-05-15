@@ -2,7 +2,18 @@
   <div>
     <div class="page-header">
       <h2><el-icon><PictureFilled /></el-icon> 心脏影像检测</h2>
-      <el-tag type="warning">心脏磁共振成像（CMR）</el-tag>
+      <div class="page-actions">
+        <el-button
+          v-if="hasContent"
+          type="danger"
+          plain
+          size="small"
+          @click="clearCurrentState"
+        >
+          清空当前内容
+        </el-button>
+        <el-tag type="warning">心脏磁共振成像（CMR）</el-tag>
+      </div>
     </div>
 
     <!-- 患者信息 -->
@@ -28,41 +39,27 @@
             </el-select>
           </el-form-item>
         </el-col>
-        <el-col :span="4">
-          <el-form-item label="置信度阈值" style="margin:0">
-            <el-slider v-model="threshold" :min="0.1" :max="0.9" :step="0.05" :format-tooltip="v => (v*100).toFixed(0)+'%'" />
-          </el-form-item>
-        </el-col>
       </el-row>
     </el-card>
 
     <el-row :gutter="16">
-      <el-col :span="10">
+      <el-col :span="5">
         <el-card shadow="never">
           <template #header><span class="card-title">上传 MRI 影像</span></template>
           <ImageUpload
+            ref="uploadRef"
             modality="mri"
             accept=".png,.jpg,.jpeg,.dcm,.dicom,.nii,.nii.gz"
             @file-selected="onFileSelected"
           />
           <div v-if="previewSrc" style="margin-top:12px">
             <p style="color:#5a7fa0;font-size:13px;margin:0 0 8px">原始影像预览：</p>
-            <img :src="previewSrc" style="max-width:100%;border-radius:8px;border:1px solid #e0eaf5" />
-          </div>
-          <!-- DICOM 元数据展示 -->
-          <div v-if="dicomMeta && Object.keys(dicomMeta).length" style="margin-top:12px">
-            <el-descriptions title="DICOM 元数据" :column="2" size="small" border>
-              <el-descriptions-item
-                v-for="(val, key) in filteredMeta"
-                :key="key"
-                :label="key"
-              >{{ val || '-' }}</el-descriptions-item>
-            </el-descriptions>
+            <img :src="previewSrc" style="width:100%;max-height:180px;object-fit:contain;border-radius:8px;border:1px solid #e0eaf5" />
           </div>
         </el-card>
       </el-col>
 
-      <el-col :span="14">
+      <el-col :span="19">
         <el-card shadow="never">
           <template #header>
             <span class="card-title">检测结果</span>
@@ -87,10 +84,10 @@
             v-else-if="detectionResult"
             :result="detectionResult"
             modality="mri"
-            :confidence-threshold="threshold"
+            :confidence-threshold="0.5"
           />
 
-          <el-empty v-else description="请上传心脏影像（支持 NIfTI/DICOM/PNG/JPG）" />
+          <el-empty v-else description="请上传心脏影像（仅支持 NIfTI）" />
         </el-card>
       </el-col>
     </el-row>
@@ -104,7 +101,7 @@
 </template>
 
 <script setup>
-import { ref, computed } from 'vue'
+import { ref, computed, onMounted, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { detectImage } from '@/api/images.js'
@@ -113,6 +110,7 @@ import DetectionResult from '@/components/DetectionResult.vue'
 
 const route = useRoute()
 const router = useRouter()
+const CACHE_KEY = 'chd_mri_detection_state_v1'
 
 function parseQueryAge(v) {
   if (v === undefined || v === null || v === '') return null
@@ -124,27 +122,37 @@ function normalizeSex(v) {
   return ['男', '女', '未知'].includes(v) ? v : '未知'
 }
 
+const patientId = ref(route.query.patientId || '')
 const patientName = ref(route.query.name || '')
 const patientAge = ref(parseQueryAge(route.query.age))
 const patientSex = ref(normalizeSex(route.query.sex))
-const threshold = ref(0.5)
 
+const uploadRef = ref(null)
 const selectedFile = ref(null)
 const previewSrc = ref('')
 const dicomMeta = ref(null)
 const detecting = ref(false)
 const detectionResult = ref(null)
 const detectRequestId = ref(0)
+const hasRoutePrefill = computed(
+  () => Boolean(patientId.value || route.query.name || route.query.age || route.query.sex),
+)
+const hasContent = computed(
+  () => Boolean(
+    selectedFile.value ||
+    previewSrc.value ||
+    dicomMeta.value ||
+    detectionResult.value ||
+    patientId.value ||
+    patientName.value ||
+    patientAge.value !== null ||
+    (patientSex.value && patientSex.value !== '未知')
+  ),
+)
 
 const isNiftiFile = computed(() => {
   const name = (selectedFile.value?.name || '').toLowerCase()
   return name.endsWith('.nii.gz') || name.endsWith('.nii')
-})
-
-const filteredMeta = computed(() => {
-  if (!dicomMeta.value) return {}
-  const keys = ['modality', 'patient_name', 'patient_age', 'patient_sex', 'study_date', 'series_description', 'rows', 'columns']
-  return Object.fromEntries(keys.map(k => [k, dicomMeta.value[k]]).filter(([, v]) => v))
 })
 
 function onFileSelected({ file, previewBase64, metadata }) {
@@ -162,6 +170,24 @@ function onFileSelected({ file, previewBase64, metadata }) {
   }
 }
 
+function clearCurrentState() {
+  selectedFile.value = null
+  previewSrc.value = ''
+  dicomMeta.value = null
+  detectionResult.value = null
+  detecting.value = false
+  detectRequestId.value += 1
+  patientId.value = ''
+  patientName.value = ''
+  patientAge.value = null
+  patientSex.value = '未知'
+  uploadRef.value?.clearFile?.()
+  sessionStorage.removeItem(CACHE_KEY)
+  sessionStorage.removeItem('chd_report_source_state_v1')
+  router.replace({ path: route.path, query: {} })
+  ElMessage.success('已清空当前检测内容')
+}
+
 async function runDetection({ silent = false } = {}) {
   if (!selectedFile.value) {
     if (!silent) ElMessage.warning('请先上传影像')
@@ -174,8 +200,8 @@ async function runDetection({ silent = false } = {}) {
     const result = await detectImage(
       selectedFile.value,
       'mri',
-      threshold.value,
-      route.query.patientId || null,
+      0.5,
+      patientId.value || null,
     )
     if (requestId !== detectRequestId.value) {
       return
@@ -196,18 +222,79 @@ async function runDetection({ silent = false } = {}) {
 }
 
 function goToReport() {
+  sessionStorage.setItem(
+    'chd_report_source_state_v1',
+    JSON.stringify({
+      modality: 'mri',
+      patientId: patientId.value || '',
+      name: patientName.value,
+      age: patientAge.value,
+      sex: patientSex.value,
+      detections: detectionResult.value?.detections || [],
+      normality: detectionResult.value?.normality || null,
+      annotated_image_base64: detectionResult.value?.annotated_image_base64 || '',
+      segmentation_mask_base64: detectionResult.value?.segmentation_mask_base64 || '',
+    }),
+  )
   router.push({
     path: '/report',
     query: {
       modality: 'mri',
-      patientId: route.query.patientId || '',
+      patientId: patientId.value || '',
       name: patientName.value,
       age: patientAge.value,
       sex: patientSex.value,
       detections: JSON.stringify(detectionResult.value?.detections || []),
+      normality: JSON.stringify(detectionResult.value?.normality || null),
     },
   })
 }
+
+function savePageState() {
+  const payload = {
+    patientId: patientId.value || '',
+    patientName: patientName.value || '',
+    patientAge: patientAge.value,
+    patientSex: patientSex.value || '未知',
+    previewSrc: previewSrc.value || '',
+    dicomMeta: dicomMeta.value || null,
+    detectionResult: detectionResult.value || null,
+  }
+  sessionStorage.setItem(CACHE_KEY, JSON.stringify(payload))
+}
+
+function restorePageState() {
+  const raw = sessionStorage.getItem(CACHE_KEY)
+  if (!raw) return
+  try {
+    const state = JSON.parse(raw)
+    patientId.value = state.patientId || ''
+    patientName.value = state.patientName || ''
+    patientAge.value = parseQueryAge(state.patientAge)
+    patientSex.value = normalizeSex(state.patientSex)
+    previewSrc.value = state.previewSrc || ''
+    dicomMeta.value = state.dicomMeta || null
+    detectionResult.value = state.detectionResult || null
+  } catch {
+    sessionStorage.removeItem(CACHE_KEY)
+  }
+}
+
+onMounted(() => {
+  if (!hasRoutePrefill.value) {
+    restorePageState()
+    return
+  }
+  savePageState()
+})
+
+watch(
+  [patientId, patientName, patientAge, patientSex, previewSrc, dicomMeta, detectionResult],
+  () => {
+    savePageState()
+  },
+  { deep: true },
+)
 </script>
 
 <style scoped>
@@ -216,6 +303,11 @@ function goToReport() {
   justify-content: space-between;
   align-items: center;
   margin-bottom: 16px;
+}
+.page-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
 }
 .page-header h2 {
   margin: 0;

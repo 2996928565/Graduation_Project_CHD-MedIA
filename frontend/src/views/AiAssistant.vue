@@ -148,7 +148,7 @@ const importing = ref(false)
 const asking = ref(false)
 
 const selectedPatientId = ref('')
-const importLimit = ref(10)
+const importLimit = ref(1)
 const importedRecords = ref([])
 const selectedTaskIds = ref([])
 
@@ -184,6 +184,12 @@ async function handleImportContext() {
       ElMessage.warning('该患者暂无检测记录')
       return
     }
+
+    messages.value.push({
+      role: 'assistant',
+      content: `已成功导入AI助手，共 ${importedRecords.value.length} 条检测记录，可开始提问。`,
+    })
+    await scrollToBottom()
 
     ElMessage.success(`已导入 ${importedRecords.value.length} 条检测记录`)
   } finally {

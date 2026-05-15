@@ -61,3 +61,11 @@ export function getNiftiSlice(taskId, sliceIndex, confidenceThreshold = 0.5) {
 export function getDetectionHistory(params = {}) {
   return request.get('/images/history', { params })
 }
+
+/**
+ * 获取单条检测历史详情
+ * @param {string} taskId
+ */
+export function getDetectionHistoryDetail(taskId) {
+  return request.get(`/images/history/${taskId}`)
+}

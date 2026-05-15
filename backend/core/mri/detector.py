@@ -5,7 +5,7 @@ MRI 影像异常检测与分割模块
 import os
 import time
 import random
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Tuple
 
 import numpy as np
 import cv2
@@ -54,11 +54,18 @@ class MRIDetector:
     支持真实 U-Net 推理（需提供模型权重）和 mock 推理（开发/演示）。
     """
 
-    def __init__(self, model_path: Optional[str] = None):
+    def __init__(
+        self,
+        model_path: Optional[str] = None,
+        normal_model_path: Optional[str] = None,
+    ):
         self.model_path = model_path or settings.mri_model_path
+        self.normal_model_path = normal_model_path or settings.mri_normal_model_path
         self.model = None
         self.device = None
+        self.normal_model_bundle: Optional[Dict[str, Any]] = None
         self._load_model()
+        self._load_normal_model()
 
     def _load_model(self) -> None:
         """尝试加载 U-Net3D 模型权重（支持 checkpoint/state_dict）。"""
@@ -103,6 +110,41 @@ class MRIDetector:
             logger.info(
                 f"MRI 分割模型权重不存在 ({self.model_path})，使用 mock 推理。"
             )
+
+    def _load_normal_model(self) -> None:
+        """加载第二模型（MLP常模模型）"""
+        if not self.normal_model_path:
+            return
+        if not os.path.exists(self.normal_model_path):
+            logger.info(f"MRI 常模模型不存在 ({self.normal_model_path})，跳过常模判别。")
+            return
+        try:
+            import torch
+            from training.normal_heart_mlp import MLPAutoEncoder
+
+            target_device = self.device or torch.device("cuda" if torch.cuda.is_available() else "cpu")
+            ckpt = torch.load(self.normal_model_path, map_location=target_device, weights_only=False)
+
+            model = MLPAutoEncoder(
+                input_dim=int(ckpt["input_dim"]),
+                hidden_dims=list(ckpt["hidden_dims"]),
+                latent_dim=int(ckpt["latent_dim"]),
+            ).to(target_device)
+            model.load_state_dict(ckpt["model_state_dict"])
+            model.eval()
+
+            self.normal_model_bundle = {
+                "model": model,
+                "feature_names": list(ckpt["feature_names"]),
+                "feature_mean": np.asarray(ckpt["feature_mean"], dtype=np.float64),
+                "feature_std": np.asarray(ckpt["feature_std"], dtype=np.float64),
+                "error_threshold": float(ckpt["error_threshold"]),
+                "device": str(target_device),
+            }
+            logger.info(f"MRI 常模模型加载成功: {self.normal_model_path} | device={target_device}")
+        except Exception as e:
+            self.normal_model_bundle = None
+            logger.warning(f"MRI 常模模型加载失败，将跳过常模判别: {e}")
 
     def detect(
         self,
@@ -149,7 +191,7 @@ class MRIDetector:
 
         # 生成带分割掩码的标注影像
         annotated = overlay_segmentation_mask(image, mask_resized, alpha=0.35)
-        annotated = draw_detections(annotated, detections, color=(255, 0, 0))
+        annotated = draw_detections(annotated, detections, color=(255, 0, 0), label_font_scale=0.4)
         annotated_bytes = to_png_bytes(annotated)
         segmentation_vis = self._colorize_segmentation(seg_map_resized)
         segmentation_mask_bytes = to_png_bytes(segmentation_vis)
@@ -175,6 +217,7 @@ class MRIDetector:
         self,
         volume_arr: np.ndarray,
         confidence_threshold: float = 0.5,
+        spacing_xyz: Optional[Tuple[float, float, float]] = None,
     ) -> Dict[str, Any]:
         """对 NIfTI 3D 体数据执行真实分割推理。"""
         start_time = time.time()
@@ -186,6 +229,14 @@ class MRIDetector:
 
         if self.model is None:
             raise RuntimeError("MRI 分割模型未加载成功，无法执行 NIfTI 3D 推理")
+
+        normality: Optional[Dict[str, Any]] = None
+        if self.normal_model_bundle is not None:
+            try:
+                full_seg_map = self._predict_full_volume_segmentation_3d(volume_arr)
+                normality = self._predict_normality(full_seg_map, spacing_xyz=spacing_xyz)
+            except Exception as e:
+                logger.warning(f"MRI 常模判别失败，已跳过: {e}")
 
         center_seg_map, center_seg_probs, inference_slice_shape = self._real_inference_3d(
             volume_arr,
@@ -205,16 +256,17 @@ class MRIDetector:
             from_size=inference_slice_shape,
             to_size=(height, width),
         )
+        detections = self._filter_detections_by_normality(detections, normality)
 
         annotated = overlay_segmentation_mask(center_bgr, center_mask, alpha=0.35)
-        annotated = draw_detections(annotated, detections, color=(255, 0, 0))
+        annotated = draw_detections(annotated, detections, color=(255, 0, 0), label_font_scale=0.4)
         annotated_bytes = to_png_bytes(annotated)
 
         segmentation_vis = self._colorize_segmentation(center_seg_map)
         segmentation_mask_bytes = to_png_bytes(segmentation_vis)
 
         elapsed = time.time() - start_time
-        anomaly_count = len([d for d in detections if d["label"] not in NORMAL_LABELS])
+        anomaly_count = len(detections)
         logger.info(
             f"MRI NIfTI 3D推理完成 | 耗时 {elapsed:.2f}s | 发现 {anomaly_count} 处异常"
         )
@@ -222,6 +274,7 @@ class MRIDetector:
         return {
             "modality": "mri",
             "detections": detections,
+            "normality": normality,
             "segmentation_available": True,
             "annotated_image_bytes": annotated_bytes,
             "segmentation_mask_bytes": segmentation_mask_bytes,
@@ -268,7 +321,7 @@ class MRIDetector:
         )
 
         annotated = overlay_segmentation_mask(slice_bgr, slice_mask, alpha=0.35)
-        annotated = draw_detections(annotated, detections, color=(255, 0, 0))
+        annotated = draw_detections(annotated, detections, color=(255, 0, 0), label_font_scale=0.4)
         annotated_bytes = to_png_bytes(annotated)
 
         segmentation_vis = self._colorize_segmentation(seg_map)
@@ -283,6 +336,7 @@ class MRIDetector:
         return {
             "modality": "mri",
             "detections": detections,
+            "normality": None,
             "segmentation_available": True,
             "annotated_image_bytes": annotated_bytes,
             "segmentation_mask_bytes": segmentation_mask_bytes,
@@ -292,6 +346,187 @@ class MRIDetector:
             "slice_index": int(slice_index),
             "volume_depth": int(depth),
         }
+
+    def _predict_full_volume_segmentation_3d(
+        self,
+        volume_arr: np.ndarray,
+        patch_size: tuple = (64, 128, 128),
+        stride: tuple = (32, 64, 64),
+    ) -> np.ndarray:
+        """
+        完整3D滑窗分割（用于第二模型特征提取）
+        """
+        import torch
+        import torch.nn.functional as F
+
+        volume = normalize_intensity(volume_arr).astype(np.float32)
+        d, h, w = volume.shape
+        pd, ph, pw = patch_size
+        sd, sh, sw = stride
+        num_classes = len(MRI_CLASSES)
+
+        prob_sum = np.zeros((num_classes, d, h, w), dtype=np.float32)
+        count_map = np.zeros((d, h, w), dtype=np.float32)
+
+        def _window_starts(size: int, patch: int, step: int) -> List[int]:
+            if size <= patch:
+                return [0]
+            starts = list(range(0, size - patch + 1, step))
+            tail = size - patch
+            if starts[-1] != tail:
+                starts.append(tail)
+            return starts
+
+        d_starts = _window_starts(d, pd, sd)
+        h_starts = _window_starts(h, ph, sh)
+        w_starts = _window_starts(w, pw, sw)
+
+        with torch.no_grad():
+            for d_start in d_starts:
+                d_end = min(d_start + pd, d)
+                d_start = d_end - pd
+                for h_start in h_starts:
+                    h_end = min(h_start + ph, h)
+                    h_start = h_end - ph
+                    for w_start in w_starts:
+                        w_end = min(w_start + pw, w)
+                        w_start = w_end - pw
+
+                        patch = volume[d_start:d_end, h_start:h_end, w_start:w_end]
+                        patch_tensor = (
+                            torch.from_numpy(patch)
+                            .unsqueeze(0)
+                            .unsqueeze(0)
+                            .float()
+                            .to(self.device)
+                        )
+                        logits = self.model(patch_tensor)
+                        probs = F.softmax(logits, dim=1).squeeze(0).cpu().numpy()
+                        prob_sum[:, d_start:d_end, h_start:h_end, w_start:w_end] += probs
+                        count_map[d_start:d_end, h_start:h_end, w_start:w_end] += 1.0
+
+        count_map = np.maximum(count_map, 1.0)
+        prob_avg = prob_sum / count_map[np.newaxis, ...]
+        seg_map = np.argmax(prob_avg, axis=0).astype(np.uint8)
+        return seg_map
+
+    def _predict_normality(
+        self,
+        seg_map_3d: np.ndarray,
+        spacing_xyz: Optional[Tuple[float, float, float]] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """
+        使用第二模型（MLP常模）判别正常/异常
+        """
+        if self.normal_model_bundle is None:
+            return None
+
+        from training.normal_heart_model import extract_case_features, features_to_vector
+        from training.normal_heart_mlp import eval_normality
+
+        feat = extract_case_features(seg_map_3d, spacing_xyz=spacing_xyz)
+        bundle = self.normal_model_bundle
+        x = features_to_vector(feat, bundle["feature_names"]).astype(np.float64)
+        model_input_features = {
+            name: float(x[idx]) for idx, name in enumerate(bundle["feature_names"])
+        }
+        feature_mean = np.asarray(bundle["feature_mean"], dtype=np.float64)
+        feature_std = np.asarray(bundle["feature_std"], dtype=np.float64)
+        # 采用均值±2σ作为展示用“正常范围”（仅用于前端可解释展示）
+        normal_ranges: Dict[str, Dict[str, float]] = {}
+        for idx, name in enumerate(bundle["feature_names"]):
+            mu = float(feature_mean[idx])
+            sigma = max(float(feature_std[idx]), 1e-6)
+            lower = max(0.0, mu - 2.0 * sigma)
+            upper = mu + 2.0 * sigma
+            normal_ranges[name] = {
+                "lower": float(lower),
+                "upper": float(upper),
+                "mean": float(mu),
+                "std": float(sigma),
+            }
+        ret = eval_normality(
+            model=bundle["model"],
+            x=x,
+            feature_names=bundle["feature_names"],
+            mean=feature_mean,
+            std=feature_std,
+            error_threshold=bundle["error_threshold"],
+            device=bundle["device"],
+        )
+        abnormal_features = []
+        for item in ret.abnormal_features:
+            feature_name = str(item.get("feature", ""))
+            new_item = dict(item)
+            if feature_name in normal_ranges:
+                new_item["normal_range"] = normal_ranges[feature_name]
+            abnormal_features.append(new_item)
+        return {
+            "is_abnormal": bool(ret.is_abnormal),
+            "score": float(ret.score),
+            "threshold": float(ret.threshold),
+            "abnormal_features": abnormal_features,
+            "model_input_features": model_input_features,
+            "normal_ranges": normal_ranges,
+        }
+
+    @staticmethod
+    def _feature_to_class_indices(feature_name: str) -> List[int]:
+        """
+        将第二模型的异常特征名映射为相关分割类别ID（1..7）
+        """
+        # 单结构特征: c1_xxx ~ c7_xxx
+        if feature_name.startswith("c") and "_" in feature_name:
+            prefix = feature_name.split("_", 1)[0]  # c1 / c2 ...
+            if len(prefix) >= 2 and prefix[1:].isdigit():
+                idx = int(prefix[1:])
+                if 1 <= idx <= 7:
+                    return [idx]
+
+        # 比值特征映射到相关结构
+        ratio_map = {
+            "ratio_lv_rv": [1, 2],
+            "ratio_la_ra": [3, 4],
+            "ratio_myo_lv": [5, 1],
+            "ratio_ao_pa": [6, 7],
+        }
+        if feature_name in ratio_map:
+            return ratio_map[feature_name]
+
+        # 全局体积特征，无法精准定位到单类，则返回全部前景类
+        if feature_name in {"fg_total_voxels", "fg_total_volume_ml"}:
+            return [1, 2, 3, 4, 5, 6, 7]
+
+        return []
+
+    def _filter_detections_by_normality(
+        self,
+        detections: List[Dict[str, Any]],
+        normality: Optional[Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        """
+        仅保留第二模型判定异常相关的结构框：
+        - normality 不可用：保持原行为（返回全部）
+        - normality 判正常：不画框
+        - normality 判异常：仅保留异常特征对应结构框
+        """
+        if normality is None:
+            return detections
+        if not bool(normality.get("is_abnormal", False)):
+            return []
+
+        abnormal_features = normality.get("abnormal_features") or []
+        abnormal_class_indices: set[int] = set()
+        for item in abnormal_features:
+            fname = str(item.get("feature", ""))
+            for cls_idx in self._feature_to_class_indices(fname):
+                abnormal_class_indices.add(cls_idx)
+
+        if not abnormal_class_indices:
+            return []
+
+        abnormal_labels = {MRI_CLASSES[i] for i in abnormal_class_indices if 0 <= i < len(MRI_CLASSES)}
+        return [d for d in detections if d.get("label") in abnormal_labels]
 
     def _real_inference(
         self, image: np.ndarray, threshold: float

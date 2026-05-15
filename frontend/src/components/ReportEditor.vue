@@ -2,7 +2,7 @@
   ReportEditor 组件
   显示并支持编辑 AI 生成的诊断报告内容。
   Props:
-    modelValue: 报告数据对象 { exam_type, exam_part, image_findings, ... }
+    modelValue: 报告数据对象 { exam_type, exam_part, all_detections, ... }
     patientInfo: { name, age, sex }
     modality: 'ultrasound' | 'mri'
   Emits:
@@ -67,7 +67,7 @@ watch(() => props.modelValue, (val) => {
 }, { deep: true })
 
 const sections = [
-  { key: 'image_findings', label: '一、影像学表现', rows: 4 },
+  { key: 'all_detections', label: '一、全部检测结果', rows: 4 },
   { key: 'abnormal_findings', label: '二、异常发现', rows: 3 },
   { key: 'preliminary_suggestion', label: '三、初步诊断意见', rows: 3 },
   { key: 'recommendations', label: '四、建议', rows: 2 },

@@ -49,6 +49,14 @@ class ReportRequest(BaseModel):
         default=[],
         description="影像检测结果列表",
     )
+    normality: Optional[Dict[str, Any]] = Field(
+        default=None,
+        description="常模检测结果",
+    )
+    report_images: Optional[Dict[str, Any]] = Field(
+        default=None,
+        description="报告附图（Base64），如 annotated_image_base64 / segmentation_mask_base64",
+    )
 
 
 class ReportData(BaseModel):
@@ -56,6 +64,7 @@ class ReportData(BaseModel):
     exam_type: str
     exam_part: str
     image_findings: str
+    all_detections: str
     abnormal_findings: str
     preliminary_suggestion: str
     recommendations: str
@@ -87,6 +96,8 @@ async def generate_diagnosis_report(
             modality=request.modality,
             patient_info=request.patient_info.model_dump(),
             detections=[d.model_dump() for d in request.detections],
+            normality=request.normality,
+            report_images=request.report_images,
         )
     except Exception as e:
         logger.error(f"报告生成失败: {e}")
@@ -139,6 +150,8 @@ async def export_report_docx(
             modality=request.modality,
             patient_info=request.patient_info.model_dump(),
             detections=[d.model_dump() for d in request.detections],
+            normality=request.normality,
+            report_images=request.report_images,
         )
         docx_bytes = export_report_to_docx(report)
     except Exception as e:
@@ -181,6 +194,8 @@ async def export_report_text(
             modality=request.modality,
             patient_info=request.patient_info.model_dump(),
             detections=[d.model_dump() for d in request.detections],
+            normality=request.normality,
+            report_images=request.report_images,
         )
     except Exception as e:
         raise HTTPException(
@@ -201,7 +216,7 @@ async def export_report_text(
         f"检查日期：{meta.get('exam_date', '')}\n"
         f"检查类型：{data.get('exam_type', '')}　检查部位：{data.get('exam_part', '')}\n"
         f"{'-'*60}\n"
-        f"【影像学表现】\n{data.get('image_findings', '')}\n\n"
+        f"【全部检测结果】\n{data.get('all_detections', '')}\n\n"
         f"【异常发现】\n{data.get('abnormal_findings', '')}\n\n"
         f"【初步诊断意见】\n{data.get('preliminary_suggestion', '')}\n\n"
         f"【建议】\n{data.get('recommendations', '')}\n"

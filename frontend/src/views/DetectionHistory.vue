@@ -22,11 +22,16 @@
             @keyup.enter="fetchHistory"
           />
         </el-form-item>
-        <el-form-item label="检查模态">
-          <el-select v-model="filters.modality" clearable placeholder="全部" style="width: 150px">
-            <el-option label="超声" value="ultrasound" />
-            <el-option label="影像" value="mri" />
-          </el-select>
+        <el-form-item label="检测日期">
+          <el-date-picker
+            v-model="filters.date_range"
+            type="daterange"
+            range-separator="至"
+            start-placeholder="开始日期"
+            end-placeholder="结束日期"
+            value-format="YYYY-MM-DD"
+            style="width: 260px"
+          />
         </el-form-item>
         <el-form-item>
           <el-button type="primary" @click="handleSearch">搜索</el-button>
@@ -42,17 +47,11 @@
         stripe
         style="width: 100%"
         empty-text="暂无检测历史"
+        @row-click="handleRowClick"
       >
         <el-table-column prop="task_id" label="任务ID" min-width="180" show-overflow-tooltip />
         <el-table-column prop="patient_name" label="患者姓名" width="110" />
         <el-table-column prop="doctor_name" label="检测医生" width="120" />
-        <el-table-column prop="modality" label="模态" width="90">
-          <template #default="{ row }">
-            <el-tag :type="row.modality === 'mri' ? 'warning' : 'primary'" size="small">
-              {{ row.modality === 'mri' ? '影像' : '超声' }}
-            </el-tag>
-          </template>
-        </el-table-column>
         <el-table-column prop="filename" label="文件名" min-width="180" show-overflow-tooltip />
         <el-table-column prop="detections_count" label="检测项" width="80" />
         <el-table-column prop="processing_time_s" label="耗时(s)" width="90">
@@ -60,6 +59,11 @@
         </el-table-column>
         <el-table-column prop="created_at" label="检测时间" width="180">
           <template #default="{ row }">{{ formatDate(row.created_at) }}</template>
+        </el-table-column>
+        <el-table-column label="操作" width="110" fixed="right">
+          <template #default="{ row }">
+            <el-button link type="primary" @click="openDetail(row.task_id)">查看详情</el-button>
+          </template>
         </el-table-column>
       </el-table>
 
@@ -76,13 +80,32 @@
         />
       </div>
     </el-card>
+
+    <el-dialog
+      v-model="detailVisible"
+      title="检测历史详情"
+      width="78%"
+      destroy-on-close
+    >
+      <div v-loading="detailLoading">
+        <el-empty v-if="!detailLoading && !detailData" description="暂无详情数据" />
+        <DetectionResult
+          v-else-if="detailData"
+          :result="detailData"
+          :modality="detailData.modality"
+          :confidence-threshold="0.5"
+        />
+      </div>
+    </el-dialog>
   </div>
 </template>
 
 <script setup>
 import { computed, onMounted, ref } from 'vue'
+import { ElMessage } from 'element-plus'
 import { useAuthStore } from '@/store/auth.js'
-import { getDetectionHistory } from '@/api/images.js'
+import { getDetectionHistory, getDetectionHistoryDetail } from '@/api/images.js'
+import DetectionResult from '@/components/DetectionResult.vue'
 
 const authStore = useAuthStore()
 const isAdmin = computed(() => (authStore.role || '').toLowerCase() === 'admin')
@@ -92,24 +115,31 @@ const rows = ref([])
 const filters = ref({
   patient_name: '',
   doctor_name: '',
-  modality: '',
+  date_range: [],
 })
 const pager = ref({
   page: 1,
   page_size: 20,
   total: 0,
 })
+const detailVisible = ref(false)
+const detailLoading = ref(false)
+const detailData = ref(null)
 
 onMounted(fetchHistory)
 
 async function fetchHistory() {
   loading.value = true
   try {
+    const startDate = Array.isArray(filters.value.date_range) ? filters.value.date_range[0] : ''
+    const endDate = Array.isArray(filters.value.date_range) ? filters.value.date_range[1] : ''
     const params = {
       page: pager.value.page,
       page_size: pager.value.page_size,
       patient_name: (filters.value.patient_name || '').trim(),
-      modality: filters.value.modality || '',
+      modality: 'mri',
+      start_date: startDate || '',
+      end_date: endDate || '',
     }
     if (isAdmin.value) {
       params.doctor_name = (filters.value.doctor_name || '').trim()
@@ -131,7 +161,7 @@ function handleSearch() {
 function handleReset() {
   filters.value.patient_name = ''
   filters.value.doctor_name = ''
-  filters.value.modality = ''
+  filters.value.date_range = []
   pager.value.page = 1
   fetchHistory()
 }
@@ -148,6 +178,26 @@ function formatDate(iso) {
 function formatSeconds(v) {
   const n = Number(v || 0)
   return Number.isFinite(n) ? n.toFixed(2) : '0.00'
+}
+
+async function openDetail(taskId) {
+  if (!taskId) return
+  detailVisible.value = true
+  detailLoading.value = true
+  detailData.value = null
+  try {
+    const res = await getDetectionHistoryDetail(taskId)
+    detailData.value = res
+  } catch {
+    ElMessage.error('加载历史详情失败')
+  } finally {
+    detailLoading.value = false
+  }
+}
+
+function handleRowClick(row) {
+  if (!row?.task_id) return
+  openDetail(row.task_id)
 }
 </script>
 

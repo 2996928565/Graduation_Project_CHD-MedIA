@@ -6,6 +6,7 @@ import base64
 import gc
 import json
 import uuid
+from datetime import datetime, time
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -104,7 +105,7 @@ class DetectionResponse(BaseModel):
     segmentation_mask_base64: Optional[str] = None
     segmentation_download_url: Optional[str] = None
     inference_mode: Optional[str] = None
-    mri_thresholds: Optional[Dict[str, Any]] = None
+    normality: Optional[Dict[str, Any]] = None
     processing_time_s: float
     image_size: Dict[str, int]
     # NIfTI 3D 结果展示（可选）：前端可据此启用逐层浏览
@@ -136,6 +137,25 @@ class DetectionHistoryResponse(BaseModel):
     page: int
     page_size: int
     items: list[DetectionHistoryItem]
+
+
+class DetectionHistoryDetailResponse(BaseModel):
+    task_id: str
+    patient_id: Optional[str] = None
+    patient_name: Optional[str] = None
+    doctor_name: str
+    modality: str
+    filename: str
+    file_size_kb: float
+    is_dicom: bool
+    dicom_metadata: Optional[Dict[str, Any]] = None
+    detections: list
+    annotated_image_base64: str
+    segmentation_mask_base64: Optional[str] = None
+    normality: Optional[Dict[str, Any]] = None
+    processing_time_s: float
+    image_size: Dict[str, int]
+    created_at: str
 
 
 # ── API 路由 ──────────────────────────────────────────────────────────────────
@@ -302,7 +322,18 @@ async def detect_image(
         else:
             detector = get_mri_detector()
             if nifti_volume is not None:
-                result = detector.detect_nifti_volume(nifti_volume, confidence_threshold)
+                spacing_xyz = None
+                try:
+                    spacing_raw = (dicom_meta or {}).get("spacing_xyz")
+                    if isinstance(spacing_raw, list) and len(spacing_raw) == 3:
+                        spacing_xyz = tuple(float(v) for v in spacing_raw)
+                except Exception:
+                    spacing_xyz = None
+                result = detector.detect_nifti_volume(
+                    nifti_volume,
+                    confidence_threshold,
+                    spacing_xyz=spacing_xyz,
+                )
             else:
                 result = detector.detect(image_bytes, confidence_threshold)
     except Exception as e:
@@ -324,6 +355,10 @@ async def detect_image(
         segmentation_path = _save_prediction(segmentation_bytes, f"{task_id}_segmentation_mask.png")
         segmentation_download_url = f"/api/v1/images/segmentation-mask/{task_id}"
 
+    record_meta = dict(dicom_meta or {})
+    if result.get("normality") is not None:
+        record_meta["normality"] = result.get("normality")
+
     record = DetectionRecord(
         task_id=task_id,
         patient_id=patient_id,
@@ -332,7 +367,7 @@ async def detect_image(
         filename=filename,
         file_size_kb=file_size_kb,
         is_dicom=is_dcm,
-        dicom_metadata=dicom_meta or {},
+        dicom_metadata=record_meta,
         detections=result["detections"],
         processing_time_s=float(result["processing_time_s"]),
         image_width=result["image_size"].get("width"),
@@ -367,7 +402,7 @@ async def detect_image(
         segmentation_mask_base64=segmentation_b64,
         segmentation_download_url=segmentation_download_url,
         inference_mode=result.get("inference_mode"),
-        mri_thresholds=settings.mri_thresholds if modality == "mri" else None,
+        normality=result.get("normality"),
         processing_time_s=result["processing_time_s"],
         image_size=result["image_size"],
         nifti_shape=(dicom_meta or {}).get("nifti_shape") if is_nifti else None,
@@ -386,6 +421,8 @@ def get_detection_history(
     patient_name: Optional[str] = Query(default=None, description="患者姓名模糊搜索"),
     doctor_name: Optional[str] = Query(default=None, description="医生姓名模糊搜索（仅管理员可用）"),
     modality: Optional[str] = Query(default=None, description="模态过滤：ultrasound/mri"),
+    start_date: Optional[str] = Query(default=None, description="开始日期（YYYY-MM-DD）"),
+    end_date: Optional[str] = Query(default=None, description="结束日期（YYYY-MM-DD）"),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ) -> DetectionHistoryResponse:
@@ -405,6 +442,33 @@ def get_detection_history(
 
     if _is_admin(current_user) and doctor_name and doctor_name.strip():
         query = query.filter(DetectionRecord.created_by_doctor.like(f"%{doctor_name.strip()}%"))
+
+    def _parse_date(s: str | None) -> Optional[datetime]:
+        if not s or not str(s).strip():
+            return None
+        text = str(s).strip()
+        try:
+            d = datetime.strptime(text, "%Y-%m-%d").date()
+        except Exception:
+            return None
+        return datetime.combine(d, time.min)
+
+    def _parse_date_end(s: str | None) -> Optional[datetime]:
+        if not s or not str(s).strip():
+            return None
+        text = str(s).strip()
+        try:
+            d = datetime.strptime(text, "%Y-%m-%d").date()
+        except Exception:
+            return None
+        return datetime.combine(d, time.max)
+
+    start_dt = _parse_date(start_date)
+    end_dt = _parse_date_end(end_date)
+    if start_dt is not None:
+        query = query.filter(DetectionRecord.created_at >= start_dt)
+    if end_dt is not None:
+        query = query.filter(DetectionRecord.created_at <= end_dt)
 
     total = query.count()
     rows = (
@@ -436,6 +500,72 @@ def get_detection_history(
         page=page,
         page_size=page_size,
         items=items,
+    )
+
+
+@router.get(
+    "/history/{task_id}",
+    response_model=DetectionHistoryDetailResponse,
+    summary="获取单条检测历史详情",
+)
+def get_detection_history_detail(
+    task_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> DetectionHistoryDetailResponse:
+    row = (
+        db.query(DetectionRecord, Patient.name.label("patient_name"))
+        .outerjoin(Patient, DetectionRecord.patient_id == Patient.id)
+        .filter(DetectionRecord.task_id == task_id)
+        .first()
+    )
+    if not row:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"未找到任务 {task_id}",
+        )
+
+    record, patient_name_val = row
+    if not _is_admin(current_user) and (record.created_by_doctor or "") != _doctor_label(current_user):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="无权限查看该检测记录",
+        )
+
+    if not record.annotated_image_path or not Path(record.annotated_image_path).exists():
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="标注图不存在，无法查看历史详情",
+        )
+
+    annotated_b64 = base64.b64encode(Path(record.annotated_image_path).read_bytes()).decode("utf-8")
+
+    segmentation_b64 = None
+    if record.segmentation_mask_path and Path(record.segmentation_mask_path).exists():
+        segmentation_b64 = base64.b64encode(Path(record.segmentation_mask_path).read_bytes()).decode("utf-8")
+
+    meta = dict(record.dicom_metadata or {})
+    normality = meta.pop("normality", None)
+    if normality is None:
+        normality = None
+
+    return DetectionHistoryDetailResponse(
+        task_id=record.task_id,
+        patient_id=record.patient_id,
+        patient_name=patient_name_val,
+        doctor_name=record.created_by_doctor or "",
+        modality=record.modality,
+        filename=record.filename,
+        file_size_kb=float(record.file_size_kb or 0.0),
+        is_dicom=bool(record.is_dicom),
+        dicom_metadata=meta,
+        detections=record.detections or [],
+        annotated_image_base64=annotated_b64,
+        segmentation_mask_base64=segmentation_b64,
+        normality=normality,
+        processing_time_s=float(record.processing_time_s or 0.0),
+        image_size={"width": int(record.image_width or 0), "height": int(record.image_height or 0)},
+        created_at=record.created_at.isoformat() if record.created_at else "",
     )
 
 
@@ -497,7 +627,7 @@ async def get_nifti_slice_result(
             "annotated_image_base64": annotated_b64,
             "segmentation_mask_base64": mask_b64,
             "inference_mode": "cache",
-            "mri_thresholds": settings.mri_thresholds,
+            "normality": None,
         }
 
     upload_path = record.upload_path
@@ -550,7 +680,7 @@ async def get_nifti_slice_result(
         "annotated_image_base64": base64.b64encode(annotated_bytes).decode("utf-8"),
         "segmentation_mask_base64": base64.b64encode(mask_bytes).decode("utf-8") if mask_bytes else None,
         "inference_mode": result.get("inference_mode"),
-        "mri_thresholds": settings.mri_thresholds,
+        "normality": result.get("normality"),
     }
 
 

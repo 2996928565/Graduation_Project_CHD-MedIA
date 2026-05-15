@@ -54,7 +54,6 @@ _ai = _cfg.get("ai", {})
 _models_cfg = _cfg.get("models", {})
 _logging = _cfg.get("logging", {})
 _prediction = _cfg.get("prediction", {})
-_mri_thresholds = _cfg.get("mri_thresholds", {})
 
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 
@@ -132,14 +131,13 @@ class Settings:
     mri_model_path: str = _resolve_config_path(
         _models_cfg.get("mri_path", "backend/models/best_model_mri.pth")
     )
+    mri_normal_model_path: str = _resolve_config_path(
+        _models_cfg.get("mri_normality_path", "backend/models/mri_normal_heart_mlp.pth")
+    )
 
     # ── 日志 ─────────────────────────────────────────────────────
     log_dir: str = _logging.get("dir", "logs")
     log_level: str = _logging.get("level", "INFO")
-
-    # ── MRI 阈值 ─────────────────────────────────────────────────
-    mri_thresholds: dict = _mri_thresholds
-
 
 settings = Settings()
 
