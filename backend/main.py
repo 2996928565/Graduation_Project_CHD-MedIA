@@ -20,8 +20,9 @@ from api.patients import router as patients_router
 from api.images import router as images_router
 from api.reports import router as reports_router
 from api.assistant import router as assistant_router
+from api.normality import router as normality_router
 from db.database import engine, get_db
-from db.models import User, Patient  # noqa: F401 — 确保建表时模型已注册
+from db.models import User, Patient, NormalityModel  # noqa: F401 — 确保建表时模型已注册
 import db.database as _db_module
 from sqlalchemy.orm import Session
 from sqlalchemy import inspect, text
@@ -66,6 +67,7 @@ app.include_router(patients_router, prefix="/api/v1")
 app.include_router(images_router, prefix="/api/v1")
 app.include_router(reports_router, prefix="/api/v1")
 app.include_router(assistant_router, prefix="/api/v1")
+app.include_router(normality_router, prefix="/api/v1")
 
 
 # ── 认证接口 ──────────────────────────────────────────────────────────────────
@@ -294,6 +296,16 @@ async def startup_event():
             )
         else:
             logger.info(f"管理员账号已存在 | 用户名: {settings.admin_username}")
+
+        active = (
+            db.query(NormalityModel)
+            .filter(NormalityModel.modality == "mri", NormalityModel.is_active == True)
+            .order_by(NormalityModel.created_at.desc())
+            .first()
+        )
+        if active and active.model_path:
+            settings.mri_normal_model_path = active.model_path
+            logger.info(f"已加载启用的 MRI 常模模型: {active.model_path}")
     finally:
         db.close()
 

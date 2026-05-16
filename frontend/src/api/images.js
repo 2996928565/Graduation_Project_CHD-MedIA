@@ -69,3 +69,48 @@ export function getDetectionHistory(params = {}) {
 export function getDetectionHistoryDetail(taskId) {
   return request.get(`/images/history/${taskId}`)
 }
+
+/**
+ * 上传分割预测标签 zip 并启动 MRI 常模训练（MLP）
+ * @param {File} zipFile
+ * @param {{model_name?:string, epochs?:number, hidden_dims?:string, latent_dim?:number, batch_size?:number, lr?:number, weight_decay?:number, threshold_quantile?:number, device?:'cuda'|'cpu', pred_is_raw_mmwhs?:boolean, normal_list_name?:string}} [opts]
+ */
+export function startMriNormalityTrainMlp(zipFile, opts = {}) {
+  const formData = new FormData()
+  formData.append('dataset_zip', zipFile)
+  formData.append('model_name', String(opts.model_name ?? 'mri_normal_heart_mlp'))
+  formData.append('epochs', String(opts.epochs ?? 200))
+  formData.append('hidden_dims', String(opts.hidden_dims ?? '64,32'))
+  formData.append('latent_dim', String(opts.latent_dim ?? 8))
+  formData.append('batch_size', String(opts.batch_size ?? 8))
+  formData.append('lr', String(opts.lr ?? 1e-3))
+  formData.append('weight_decay', String(opts.weight_decay ?? 1e-5))
+  formData.append('threshold_quantile', String(opts.threshold_quantile ?? 0.99))
+  formData.append('device', String(opts.device ?? 'cuda'))
+  formData.append('pred_is_raw_mmwhs', String(Boolean(opts.pred_is_raw_mmwhs ?? false)))
+  formData.append('normal_list_name', String(opts.normal_list_name ?? 'normal_list.txt'))
+  return request.post('/normality/train-mlp', formData, {
+    headers: { 'Content-Type': 'multipart/form-data' },
+    timeout: 300000,
+  })
+}
+
+/** 获取 MRI 常模训练状态（MLP） */
+export function getMriNormalityTrainMlpStatus(runId) {
+  return request.get(`/normality/train-mlp/${runId}`)
+}
+
+/** 获取 MRI 常模训练日志（MLP，末尾若干行） */
+export function getMriNormalityTrainMlpLog(runId, lines = 200) {
+  return request.get(`/normality/train-mlp/${runId}/log`, { params: { lines } })
+}
+
+/** 列出已训练的常模模型（管理员） */
+export function listNormalityModels(modality = 'mri') {
+  return request.get('/normality/models', { params: { modality } })
+}
+
+/** 启用某个常模模型（管理员） */
+export function activateNormalityModel(modelId) {
+  return request.post(`/normality/models/${modelId}/activate`)
+}

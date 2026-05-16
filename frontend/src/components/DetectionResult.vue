@@ -73,6 +73,7 @@
           </span>
           <span>
             residual={{ formatFeatureValue(item.abs_residual_std || item.abs_z) }}
+            ｜当前值：{{ formatFeatureValue(item.value) }}
             <span v-if="getNormalRangeText(item.feature, item.normal_range)">
               ｜正常范围：{{ getNormalRangeText(item.feature, item.normal_range) }}
             </span>

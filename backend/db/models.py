@@ -80,3 +80,20 @@ class ReportRecord(Base):
     patient_info = Column(JSON, default=dict, comment="患者信息")
     report_data = Column(JSON, default=dict, comment="结构化报告内容")
     created_at = Column(DateTime, default=datetime.now, comment="创建时间")
+
+
+class NormalityModel(Base):
+    __tablename__ = "normality_models"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    modality = Column(String(20), nullable=False, default="mri", index=True, comment="模态：mri")
+    model_type = Column(String(50), nullable=False, default="mlp", index=True, comment="模型类型：mlp")
+    display_name = Column(String(120), nullable=True, comment="展示名称")
+    run_id = Column(String(64), unique=True, nullable=True, index=True, comment="训练run_id")
+    model_path = Column(String(255), nullable=False, comment="模型文件路径")
+    summary_path = Column(String(255), nullable=True, comment="训练摘要路径")
+    log_path = Column(String(255), nullable=True, comment="训练日志路径")
+    params = Column(JSON, default=dict, comment="训练参数")
+    created_by = Column(String(100), nullable=True, comment="创建者")
+    is_active = Column(Boolean, default=False, index=True, comment="是否启用")
+    created_at = Column(DateTime, default=datetime.now, comment="创建时间")
