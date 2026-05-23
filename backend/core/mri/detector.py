@@ -9,6 +9,7 @@ from typing import List, Dict, Any, Optional, Tuple
 
 import numpy as np
 import cv2
+from scipy import ndimage as ndi
 
 from loguru import logger
 from config.settings import settings
@@ -408,6 +409,7 @@ class MRIDetector:
         count_map = np.maximum(count_map, 1.0)
         prob_avg = prob_sum / count_map[np.newaxis, ...]
         seg_map = np.argmax(prob_avg, axis=0).astype(np.uint8)
+        seg_map = self._keep_main_foreground_component_3d(seg_map)
         return seg_map
 
     def _predict_normality(
@@ -644,6 +646,7 @@ class MRIDetector:
         center_probs = center_prob_sum / center_count[np.newaxis, :, :]
         center_probs = center_probs[:, :height, :width]
         center_seg_map = np.argmax(center_probs, axis=0).astype(np.uint8)
+        center_seg_map = self._keep_main_foreground_component_2d(center_seg_map)
         return center_seg_map, center_probs, (height, width)
 
     def _mock_inference(self, image: np.ndarray, threshold: float):
@@ -736,6 +739,80 @@ class MRIDetector:
                     break
 
         return MRIDetector._apply_nms(detections, iou_threshold=0.35, max_detections=12)
+
+    @staticmethod
+    def _keep_main_foreground_component_3d(seg_map: np.ndarray) -> np.ndarray:
+        """
+        3D 后处理：仅保留最可能的主体心脏前景连通域。
+
+        目标是在外部数据上尽快抑制落到其他器官上的误分割。
+        """
+        fg_mask = seg_map > 0
+        if not np.any(fg_mask):
+            return seg_map
+
+        labeled, num = ndi.label(fg_mask)
+        if num <= 1:
+            return seg_map
+
+        center = np.array(seg_map.shape, dtype=np.float32) / 2.0
+        best_label = 0
+        best_score = -1.0
+
+        for comp_idx in range(1, num + 1):
+            comp_mask = labeled == comp_idx
+            size = int(comp_mask.sum())
+            if size <= 0:
+                continue
+            comp_center = np.array(ndi.center_of_mass(comp_mask), dtype=np.float32)
+            dist = float(np.linalg.norm(comp_center - center))
+            # 大小优先，辅以中心距离约束，快速抑制远处误分割。
+            score = size - 150.0 * dist
+            if score > best_score:
+                best_score = score
+                best_label = comp_idx
+
+        if best_label <= 0:
+            return seg_map
+
+        keep_mask = labeled == best_label
+        out = seg_map.copy()
+        out[~keep_mask] = 0
+        return out
+
+    @staticmethod
+    def _keep_main_foreground_component_2d(seg_map: np.ndarray) -> np.ndarray:
+        """2D 后处理：仅保留中心切片上的主体前景连通域。"""
+        fg_mask = (seg_map > 0).astype(np.uint8)
+        if fg_mask.max() == 0:
+            return seg_map
+
+        num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(fg_mask, connectivity=8)
+        if num_labels <= 2:
+            return seg_map
+
+        center = np.array([seg_map.shape[1] / 2.0, seg_map.shape[0] / 2.0], dtype=np.float32)
+        best_label = 0
+        best_score = -1.0
+
+        for comp_idx in range(1, num_labels):
+            area = int(stats[comp_idx, cv2.CC_STAT_AREA])
+            if area <= 0:
+                continue
+            comp_center = np.array(centroids[comp_idx], dtype=np.float32)
+            dist = float(np.linalg.norm(comp_center - center))
+            score = area - 80.0 * dist
+            if score > best_score:
+                best_score = score
+                best_label = comp_idx
+
+        if best_label <= 0:
+            return seg_map
+
+        keep_mask = labels == best_label
+        out = seg_map.copy()
+        out[~keep_mask] = 0
+        return out
 
     @staticmethod
     def _apply_nms(
