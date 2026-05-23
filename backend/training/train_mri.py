@@ -17,7 +17,7 @@ from tqdm import tqdm
 # 添加项目根目录到path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from training.dataset import get_dataloaders, MMWHS_CLASS_NAMES, remap_labels
+from training.dataset import AugmentConfig, get_dataloaders, MMWHS_CLASS_NAMES, remap_labels
 from training.model import get_model, CombinedLoss
 import SimpleITK as sitk
 
@@ -149,6 +149,21 @@ def train(args):
     # 数据加载
     print("\n=== 加载数据 ===")
     print(f"从训练集随机划分 ({args.train_ratio:.0%} 训练 / {1-args.train_ratio:.0%} 验证)")
+
+    augment_config = AugmentConfig(
+        flip_prob=args.flip_prob,
+        rotate_prob=args.rotate_prob,
+        rotate_deg=args.rotate_deg,
+        scale_prob=args.scale_prob,
+        scale_min=args.scale_min,
+        scale_max=args.scale_max,
+        noise_prob=args.noise_prob,
+        noise_std=args.noise_std,
+        intensity_prob=args.intensity_prob,
+        intensity_scale_min=args.intensity_scale_min,
+        intensity_scale_max=args.intensity_scale_max,
+        intensity_shift=args.intensity_shift,
+    )
     
     train_loader, val_loader = get_dataloaders(
         data_dir=args.data_dir,
@@ -157,6 +172,9 @@ def train(args):
         crop_size=tuple(args.crop_size),
         num_workers=args.num_workers,
         train_ratio=args.train_ratio,
+        augment=not args.no_augment,
+        augment_config=augment_config,
+        foreground_prob=args.foreground_prob,
     )
     
     # 模型
@@ -277,6 +295,8 @@ def main():
                         help="3D patch大小 (D H W)")
     parser.add_argument("--train_ratio", type=float, default=0.8,
                         help="训练集比例，从 mr_train/ 按此比例划分训练集和验证集")
+    parser.add_argument("--foreground_prob", type=float, default=0.7,
+                        help="训练时前景引导随机裁剪概率")
     
     # 模型
     parser.add_argument("--num_classes", type=int, default=8,
@@ -298,6 +318,34 @@ def main():
                         help="数据加载线程数")
     parser.add_argument("--no_class_weights", action="store_true",
                         help="禁用类别权重（默认启用）")
+    parser.add_argument("--no_augment", action="store_true",
+                        help="禁用训练数据增强")
+
+    # 数据增强
+    parser.add_argument("--flip_prob", type=float, default=0.5,
+                        help="随机翻转概率")
+    parser.add_argument("--rotate_prob", type=float, default=0.35,
+                        help="随机旋转概率")
+    parser.add_argument("--rotate_deg", type=float, default=10.0,
+                        help="随机旋转最大角度")
+    parser.add_argument("--scale_prob", type=float, default=0.30,
+                        help="随机缩放概率")
+    parser.add_argument("--scale_min", type=float, default=0.95,
+                        help="随机缩放下限")
+    parser.add_argument("--scale_max", type=float, default=1.05,
+                        help="随机缩放上限")
+    parser.add_argument("--noise_prob", type=float, default=0.25,
+                        help="高斯噪声概率")
+    parser.add_argument("--noise_std", type=float, default=0.015,
+                        help="高斯噪声标准差")
+    parser.add_argument("--intensity_prob", type=float, default=0.30,
+                        help="强度扰动概率")
+    parser.add_argument("--intensity_scale_min", type=float, default=0.9,
+                        help="强度缩放下限")
+    parser.add_argument("--intensity_scale_max", type=float, default=1.1,
+                        help="强度缩放上限")
+    parser.add_argument("--intensity_shift", type=float, default=0.05,
+                        help="强度平移幅度")
     
     # 保存
     parser.add_argument("--save_dir", type=str, default="backend/training/checkpoints",

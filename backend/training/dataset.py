@@ -3,6 +3,7 @@ MM-WHS 2017 Dataset Loader
 支持MRI和CT数据的3D patch提取和数据增强
 """
 import random
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Tuple, Optional, List
 
@@ -52,6 +53,23 @@ def normalize_intensity(image: np.ndarray, lower_perc: float = 1.0, upper_perc: 
     image = np.clip(image, p1, p99)
     image = (image - p1) / (p99 - p1 + 1e-8)
     return image.astype(np.float32)
+
+
+@dataclass
+class AugmentConfig:
+    """适合小样本 MRI 分割的轻量 3D 数据增强配置"""
+    flip_prob: float = 0.5
+    rotate_prob: float = 0.35
+    rotate_deg: float = 10.0
+    scale_prob: float = 0.30
+    scale_min: float = 0.95
+    scale_max: float = 1.05
+    noise_prob: float = 0.25
+    noise_std: float = 0.015
+    intensity_prob: float = 0.30
+    intensity_scale_min: float = 0.9
+    intensity_scale_max: float = 1.1
+    intensity_shift: float = 0.05
 
 
 def _center_crop_or_pad(image: np.ndarray, target_size: Tuple[int, int, int]) -> np.ndarray:
@@ -131,33 +149,37 @@ def random_crop_3d(
     return image_crop, label_crop
 
 
-def augment_3d(image: np.ndarray, label: np.ndarray, p: float = 0.5) -> Tuple[np.ndarray, np.ndarray]:
-    """3D数据增强（保持尺寸不变）"""
+def augment_3d(
+    image: np.ndarray,
+    label: np.ndarray,
+    config: Optional[AugmentConfig] = None,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """3D 数据增强（保持尺寸不变）"""
+    config = config or AugmentConfig()
     target_shape = image.shape
-    
+
     # 随机翻转
-    if random.random() < p:
+    if random.random() < config.flip_prob:
         axis = random.choice([0, 1, 2])
         image = np.flip(image, axis=axis).copy()
         label = np.flip(label, axis=axis).copy()
-    
-    # 随机旋转（小角度）
-    if random.random() < p:
-        angle = random.uniform(-10, 10)
+
+    # 随机旋转（小角度，避免破坏解剖结构）
+    if random.random() < config.rotate_prob:
+        angle = random.uniform(-config.rotate_deg, config.rotate_deg)
         axes = random.choice([(0, 1), (0, 2), (1, 2)])
         image = rotate(image, angle, axes=axes, reshape=False, order=1, mode='constant', cval=0)
         label = rotate(label, angle, axes=axes, reshape=False, order=0, mode='constant', cval=0)
-    
-    # 随机缩放（但保持输出尺寸不变）
-    if random.random() < p:
-        scale = random.uniform(0.9, 1.1)
+
+    # 随机缩放（轻微变化，保持输出尺寸不变）
+    if random.random() < config.scale_prob:
+        scale = random.uniform(config.scale_min, config.scale_max)
         zoom_factors = (scale, scale, scale)
         image_zoomed = zoom(image, zoom_factors, order=1, mode='constant', cval=0)
         label_zoomed = zoom(label, zoom_factors, order=0, mode='constant', cval=0)
-        
+
         # 裁剪或填充回原始大小
         if scale > 1.0:
-            # 缩放后变大，需要裁剪
             starts = [(image_zoomed.shape[i] - target_shape[i]) // 2 for i in range(3)]
             image = image_zoomed[starts[0]:starts[0]+target_shape[0],
                                  starts[1]:starts[1]+target_shape[1],
@@ -166,7 +188,6 @@ def augment_3d(image: np.ndarray, label: np.ndarray, p: float = 0.5) -> Tuple[np
                                  starts[1]:starts[1]+target_shape[1],
                                  starts[2]:starts[2]+target_shape[2]]
         else:
-            # 缩放后变小，需要填充
             pads = [(target_shape[i] - image_zoomed.shape[i]) // 2 for i in range(3)]
             image = np.pad(image_zoomed,
                           [(pads[i], target_shape[i] - image_zoomed.shape[i] - pads[i]) for i in range(3)],
@@ -174,12 +195,17 @@ def augment_3d(image: np.ndarray, label: np.ndarray, p: float = 0.5) -> Tuple[np
             label = np.pad(label_zoomed,
                           [(pads[i], target_shape[i] - label_zoomed.shape[i] - pads[i]) for i in range(3)],
                           mode='constant', constant_values=0)
-    
+    # 轻微强度扰动，提升对扫描条件变化的鲁棒性
+    if random.random() < config.intensity_prob:
+        scale = random.uniform(config.intensity_scale_min, config.intensity_scale_max)
+        shift = random.uniform(-config.intensity_shift, config.intensity_shift)
+        image = np.clip(image * scale + shift, 0, 1)
+
     # 随机高斯噪声
-    if random.random() < p:
-        noise = np.random.normal(0, 0.02, image.shape)
+    if random.random() < config.noise_prob:
+        noise = np.random.normal(0, config.noise_std, image.shape)
         image = np.clip(image + noise, 0, 1)
-    
+
     return image.astype(np.float32), label.astype(np.uint8)
 
 
@@ -200,6 +226,7 @@ class MMWHSDataset(Dataset):
         modality: str = "mr",  # 'mr' or 'ct'
         crop_size: Tuple[int, int, int] = (64, 128, 128),
         augment: bool = True,
+        augment_config: Optional[AugmentConfig] = None,
         train_ratio: float = 0.8,
         crop_mode: str = "random",
         foreground_prob: float = 0.0,
@@ -221,6 +248,7 @@ class MMWHSDataset(Dataset):
         self.crop_size = crop_size
         self.has_labels = (split != "test")  # test split 无标注
         self.augment = augment and (split == "train")
+        self.augment_config = augment_config or AugmentConfig()
         self.crop_mode = crop_mode
         self.foreground_prob = foreground_prob
         
@@ -317,7 +345,11 @@ class MMWHSDataset(Dataset):
             
             # 数据增强
             if self.augment:
-                img_patch, lbl_patch = augment_3d(img_patch, lbl_patch, p=0.5)
+                img_patch, lbl_patch = augment_3d(
+                    img_patch,
+                    lbl_patch,
+                    config=self.augment_config,
+                )
             
             lbl_tensor = torch.from_numpy(lbl_patch).long()  # (D, H, W)
         else:
@@ -344,6 +376,9 @@ def get_dataloaders(
     crop_size: Tuple[int, int, int] = (64, 128, 128),
     num_workers: int = 4,
     train_ratio: float = 0.8,
+    augment: bool = True,
+    augment_config: Optional[AugmentConfig] = None,
+    foreground_prob: float = 0.7,
 ):
     """
     创建训练和验证 DataLoader。
@@ -359,10 +394,11 @@ def get_dataloaders(
         split="train",
         modality=modality,
         crop_size=crop_size,
-        augment=True,
+        augment=augment,
+        augment_config=augment_config,
         train_ratio=train_ratio,
         crop_mode="random",
-        foreground_prob=0.7,
+        foreground_prob=foreground_prob,
     )
     
     val_dataset = MMWHSDataset(
